@@ -1,0 +1,38 @@
+# LLM and LangChain
+langchain
+langchain-aws
+langchain-community
+# langchain-pinecone>=0.2.0  # Python 3.14未対応のため一時的にコメントアウト
+
+# AWS
+boto3
+botocore
+
+# Slack
+slack-bolt
+slack-sdk
+
+# Vector Database
+# pinecone-client==5.0.1  # Python 3.14未対応のため一時的にコメントアウト
+
+# Document Loaders
+pypdf==5.1.0
+python-docx==1.1.2
+markdown==3.7
+beautifulsoup4==4.12.3
+requests==2.32.3
+
+# Confluence and Notion
+atlassian-python-api==3.41.16
+notion-client==2.2.1
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.10.5
+pydantic-settings==2.7.1
+
+# Development and Testing
+pytest==8.3.4
+black==24.10.0
+flake8==7.1.1
+mypy==1.14.1
