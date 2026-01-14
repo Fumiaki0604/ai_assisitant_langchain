@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from config.settings import settings
-from src.llm.bedrock import get_bedrock_llm
+from src.rag.rag_service import get_rag_service
 import logging
 import re
 
@@ -23,8 +23,8 @@ app = App(
     signing_secret=settings.slack_signing_secret
 )
 
-# LLMインスタンスを取得
-llm = get_bedrock_llm()
+# RAGサービスを取得
+rag_service = get_rag_service()
 
 # 自動返信対象チャンネルのリスト
 AUTO_REPLY_CHANNELS = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
@@ -111,13 +111,22 @@ def handle_mention(event, say, client):
         # ボットのメンションを削除してクリーンなテキストを取得
         clean_text = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
 
-        # Claudeに質問を送信
-        logger.info(f"Sending to Claude: {clean_text}")
-        response = llm.invoke(clean_text)
+        # RAGで回答を生成
+        logger.info(f"Processing question with RAG: {clean_text}")
+        result = rag_service.answer_question(clean_text)
+
+        # 回答を整形
+        answer_text = result['answer']
+
+        # 参考ドキュメントがある場合は追記
+        if result['sources']:
+            answer_text += "\n\n_参考ドキュメント:_"
+            for i, source in enumerate(result['sources'][:2], 1):  # 最大2件
+                answer_text += f"\n• {source['title']}"
 
         # Slackに返信（スレッドで返信）
         say(
-            text=response.content,
+            text=answer_text,
             thread_ts=thread_ts
         )
 
@@ -171,12 +180,21 @@ def handle_message_events(event, say, client):
         # 新しい質問（スレッドでない）またはまだ誰も返信していないスレッド
         logger.info(f"Auto-replying to message from {user} in channel {channel}: {text}")
 
-        # Claudeに質問を送信
-        response = llm.invoke(text)
+        # RAGで回答を生成
+        result = rag_service.answer_question(text)
+
+        # 回答を整形
+        answer_text = result['answer']
+
+        # 参考ドキュメントがある場合は追記
+        if result['sources']:
+            answer_text += "\n\n_参考ドキュメント:_"
+            for i, source in enumerate(result['sources'][:2], 1):  # 最大2件
+                answer_text += f"\n• {source['title']}"
 
         # Slackに返信（スレッドで返信）
         say(
-            text=response.content,
+            text=answer_text,
             thread_ts=thread_ts or ts  # 新規メッセージの場合はスレッドを開始
         )
 

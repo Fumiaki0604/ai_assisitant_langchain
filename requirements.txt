@@ -2,7 +2,7 @@
 langchain
 langchain-aws
 langchain-community
-# langchain-pinecone>=0.2.0  # Python 3.14未対応のため一時的にコメントアウト
+langchain-pinecone
 
 # AWS
 boto3
@@ -13,7 +13,7 @@ slack-bolt
 slack-sdk
 
 # Vector Database
-# pinecone-client==5.0.1  # Python 3.14未対応のため一時的にコメントアウト
+pinecone-client
 
 # Document Loaders
 pypdf==5.1.0
