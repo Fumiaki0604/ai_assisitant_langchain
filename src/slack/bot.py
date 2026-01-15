@@ -11,6 +11,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from config.settings import settings
 from src.rag.rag_service import get_rag_service
+from src.feedback.feedback_logger import get_feedback_logger
 import logging
 import re
 
@@ -25,6 +26,9 @@ app = App(
 
 # RAGサービスを取得
 rag_service = get_rag_service()
+
+# フィードバックロガーを取得
+feedback_logger = get_feedback_logger()
 
 # 自動返信対象チャンネルのリスト
 AUTO_REPLY_CHANNELS = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
@@ -202,6 +206,77 @@ def handle_message_events(event, say, client):
 
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
+
+
+@app.event("reaction_added")
+def handle_reaction_added(event, client):
+    """
+    リアクション追加イベントの処理
+    👍(+1) / 👎(-1) でフィードバックを記録
+    """
+    try:
+        reaction = event.get("reaction")
+        user = event.get("user")
+        item = event.get("item", {})
+        channel = item.get("channel")
+        message_ts = item.get("ts")
+
+        # 対象のリアクションかチェック
+        if reaction not in ["+1", "-1", "thumbsup", "thumbsdown"]:
+            return
+
+        # ボットのユーザーIDを取得
+        bot_user_id = client.auth_test()["user_id"]
+
+        # リアクションが付けられたメッセージを取得
+        result = client.conversations_history(
+            channel=channel,
+            latest=message_ts,
+            limit=1,
+            inclusive=True
+        )
+
+        messages = result.get("messages", [])
+        if not messages:
+            return
+
+        message = messages[0]
+
+        # ボットのメッセージかチェック
+        if message.get("user") != bot_user_id and not message.get("bot_id"):
+            return
+
+        # 元の質問を取得（スレッドの親メッセージ）
+        thread_ts = message.get("thread_ts")
+        question = ""
+
+        if thread_ts:
+            thread_result = client.conversations_replies(
+                channel=channel,
+                ts=thread_ts,
+                limit=1
+            )
+            thread_messages = thread_result.get("messages", [])
+            if thread_messages:
+                question = thread_messages[0].get("text", "")
+
+        # フィードバックタイプを判定
+        feedback_type = "positive" if reaction in ["+1", "thumbsup"] else "negative"
+
+        # フィードバックを記録
+        feedback_logger.log_feedback(
+            feedback_type=feedback_type,
+            question=question,
+            answer=message.get("text", ""),
+            channel=channel,
+            user=user,
+            message_ts=message_ts
+        )
+
+        logger.info(f"Feedback recorded: {feedback_type} from {user}")
+
+    except Exception as e:
+        logger.error(f"Error handling reaction: {e}", exc_info=True)
 
 
 def start_bot():

@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv
+.venv
+env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Logs (will be mounted as volume)
+logs/*
+
+# Environment (will be passed via env_file)
+.env
+
+# Documentation
+*.md
+!requirements.txt
+
+# Tests
+tests
+*.test.py
+
+# AWS credentials CSV
+*.csv

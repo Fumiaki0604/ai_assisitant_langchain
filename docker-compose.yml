@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  slack-bot:
+    build: .
+    container_name: slack-ai-assistant
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # ログを永続化
+      - ./logs:/app/logs
+      # ドキュメントフォルダをマウント
+      - ./documents:/app/documents
+      # AWS認証情報（ホストの設定を使用）
+      - ~/.aws:/root/.aws:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
