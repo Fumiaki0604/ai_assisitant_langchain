@@ -1,12 +1,13 @@
 # LLM and LangChain
-langchain
-langchain-aws
-langchain-community
-langchain-pinecone
+langchain==0.3.13
+langchain-aws==0.2.6
+langchain-community==0.3.13
+langchain-pinecone==0.2.0
+langchain-core==0.3.28
 
 # AWS
-boto3
-botocore
+boto3>=1.34.0
+botocore>=1.34.0
 
 # Slack
 slack-bolt

@@ -128,9 +128,40 @@ def handle_mention(event, say, client):
             for i, source in enumerate(result['sources'][:2], 1):  # 最大2件
                 answer_text += f"\n• {source['title']}"
 
-        # Slackに返信（スレッドで返信）
+        # Block Kitでフィードバックボタン付きメッセージを送信
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": answer_text}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "_この回答は役に立ちましたか？_"}
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "👍 良い", "emoji": True},
+                        "style": "primary",
+                        "action_id": "feedback_positive",
+                        "value": clean_text
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "👎 改善が必要", "emoji": True},
+                        "action_id": "feedback_negative",
+                        "value": clean_text
+                    }
+                ]
+            }
+        ]
+
         say(
             text=answer_text,
+            blocks=blocks,
             thread_ts=thread_ts
         )
 
@@ -157,6 +188,11 @@ def handle_message_events(event, say, client):
 
         # ボット自身のメッセージは無視
         if event.get("bot_id"):
+            return
+
+        # メンションを含むメッセージは無視（app_mentionイベントで処理）
+        text = event.get("text", "")
+        if re.search(r'<@[A-Z0-9]+>', text):
             return
 
         channel = event.get("channel")
@@ -196,10 +232,41 @@ def handle_message_events(event, say, client):
             for i, source in enumerate(result['sources'][:2], 1):  # 最大2件
                 answer_text += f"\n• {source['title']}"
 
-        # Slackに返信（スレッドで返信）
+        # Block Kitでフィードバックボタン付きメッセージを送信
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": answer_text}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "_この回答は役に立ちましたか？_"}
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "👍 良い", "emoji": True},
+                        "style": "primary",
+                        "action_id": "feedback_positive",
+                        "value": text
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "👎 改善が必要", "emoji": True},
+                        "action_id": "feedback_negative",
+                        "value": text
+                    }
+                ]
+            }
+        ]
+
         say(
             text=answer_text,
-            thread_ts=thread_ts or ts  # 新規メッセージの場合はスレッドを開始
+            blocks=blocks,
+            thread_ts=thread_ts or ts
         )
 
         logger.info(f"Auto-response sent")
@@ -208,11 +275,97 @@ def handle_message_events(event, say, client):
         logger.error(f"Error handling message: {e}", exc_info=True)
 
 
+@app.action("feedback_positive")
+def handle_feedback_positive(ack, body, client):
+    """
+    👍ボタンクリック時の処理
+    """
+    ack()
+    try:
+        user = body["user"]["id"]
+        channel = body["channel"]["id"]
+        message = body["message"]
+        message_ts = message["ts"]
+        question = body["actions"][0].get("value", "")
+        answer = message.get("text", "")
+
+        feedback_logger.log_feedback(
+            feedback_type="positive",
+            question=question,
+            answer=answer,
+            channel=channel,
+            user=user,
+            message_ts=message_ts
+        )
+
+        # ボタンを「ありがとうございます」に更新
+        blocks = message.get("blocks", [])[:-1]  # actionsブロックを削除
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "✅ フィードバックありがとうございます！"}]
+        })
+
+        client.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=answer,
+            blocks=blocks
+        )
+
+        logger.info(f"Positive feedback recorded from {user}")
+
+    except Exception as e:
+        logger.error(f"Error handling positive feedback: {e}", exc_info=True)
+
+
+@app.action("feedback_negative")
+def handle_feedback_negative(ack, body, client):
+    """
+    👎ボタンクリック時の処理
+    """
+    ack()
+    try:
+        user = body["user"]["id"]
+        channel = body["channel"]["id"]
+        message = body["message"]
+        message_ts = message["ts"]
+        question = body["actions"][0].get("value", "")
+        answer = message.get("text", "")
+
+        feedback_logger.log_feedback(
+            feedback_type="negative",
+            question=question,
+            answer=answer,
+            channel=channel,
+            user=user,
+            message_ts=message_ts
+        )
+
+        # ボタンを「ありがとうございます」に更新
+        blocks = message.get("blocks", [])[:-1]  # actionsブロックを削除
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "✅ フィードバックありがとうございます！改善に活用します。"}]
+        })
+
+        client.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=answer,
+            blocks=blocks
+        )
+
+        logger.info(f"Negative feedback recorded from {user}")
+
+    except Exception as e:
+        logger.error(f"Error handling negative feedback: {e}", exc_info=True)
+
+
 @app.event("reaction_added")
 def handle_reaction_added(event, client):
     """
     リアクション追加イベントの処理
-    👍(+1) / 👎(-1) でフィードバックを記録
+    👍(+1) / 👎(-1) でフィードバックを記録（後方互換）
     """
     try:
         reaction = event.get("reaction")

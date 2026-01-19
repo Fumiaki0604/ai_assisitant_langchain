@@ -1,183 +1,116 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this Slack AI Assistant project.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Rules
+- 回答は最大7行（箇条書き換算）
+- 不明な場合は推測せず「不明」と明示
+- コードは変更差分（diff）または変更箇所のみ
+- ログはエラー前後など要点のみ（最大50行）
+
+## Style
+- 日本語
+- 丁寧だが簡潔
 
 ## Project Overview
 
-Slack AI Assistantは、Slack内の質問に対してRAG（検索拡張生成）を使用して自動回答するPythonアプリケーションです。
+Slack AI Assistant - RAG（検索拡張生成）を使用してSlack内の質問に自動回答するPythonアプリケーション。AWS ECS Fargateで24時間稼働。
 
-## 技術スタック
-
-- **Python 3.11+**
-- **LangChain**: LLMオーケストレーションフレームワーク
-- **AWS Bedrock**: Claude 3.5 Sonnetを使用
-- **Pinecone**: ベクトルデータベース
-- **slack-bolt**: Slackアプリフレームワーク
-
-## プロジェクト構造
-
-```
-slack-ai-assistant/
-├── src/
-│   ├── slack/              # Slackイベント処理
-│   │   ├── bot.py          # Slackボット初期化
-│   │   └── event_handler.py # イベントハンドラー
-│   ├── rag/                # RAG関連ロジック
-│   │   ├── embeddings.py   # 埋め込み生成
-│   │   ├── vectorstore.py  # Pinecone操作
-│   │   └── retriever.py    # 検索ロジック
-│   ├── llm/                # LLM連携
-│   │   └── bedrock.py      # AWS Bedrock連携
-│   ├── data_sources/       # データソース連携
-│   │   ├── slack_loader.py     # Slack履歴取得
-│   │   ├── confluence_loader.py # Confluence連携
-│   │   ├── notion_loader.py    # Notion連携
-│   │   └── file_loader.py      # ファイル読込
-│   ├── indexing/           # インデックス構築
-│   │   └── index_builder.py # インデックス構築スクリプト
-│   └── feedback/           # フィードバック処理
-│       └── feedback_handler.py # リアクション収集
-├── config/
-│   └── settings.py         # 設定管理（Pydantic Settings）
-├── scripts/
-│   └── setup_index.py      # 初回インデックス構築
-└── tests/                  # テストコード
-```
-
-## 重要な実装パターン
-
-### 1. 設定管理
-
-`config/settings.py`でPydantic Settingsを使用して環境変数を管理しています。
-
-```python
-from config.settings import settings
-
-# 設定の使用例
-region = settings.aws_region
-model_id = settings.bedrock_model_id
-```
-
-### 2. AWS Bedrock連携
-
-`src/llm/bedrock.py`でBedrockとの連携を実装しています。
-
-AWS認証は以下の順序で自動取得されます：
-1. 環境変数 (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-2. AWS CLI設定 (~/.aws/credentials)
-3. IAMロール
-
-```python
-from src.llm.bedrock import get_bedrock_llm
-
-llm = get_bedrock_llm()
-response = llm.invoke("質問内容")
-```
-
-### 3. RAGパターン
-
-LangChainのRAGパターンを使用します：
-
-1. **ドキュメントのロード**: data_sources/内の各ローダー
-2. **チャンク分割**: LangChainのTextSplitter
-3. **埋め込み生成**: BedrockEmbeddings
-4. **ベクトル保存**: Pinecone
-5. **検索と生成**: Retriever + LLM
-
-### 4. Slackイベント処理
-
-slack-boltを使用してイベントを処理します：
-
-```python
-from slack_bolt import App
-
-app = App(token=settings.slack_bot_token)
-
-@app.event("app_mention")
-def handle_mention(event, say):
-    # メンション処理
-    pass
-```
-
-## 開発ワークフロー
-
-### 初回セットアップ
-
-1. 仮想環境作成
-```bash
-python -m venv venv
-venv\Scripts\activate  # Windows
-```
-
-2. 依存関係インストール
-```bash
-pip install -r requirements.txt
-```
-
-3. 環境変数設定
-```bash
-cp .env.example .env
-# .envを編集して必要な情報を入力
-```
-
-4. AWS設定確認
-```bash
-aws configure  # AWS CLIで認証情報を設定済み
-```
-
-5. Bedrock接続テスト
-```bash
-python src/llm/bedrock.py
-```
-
-### データインデックス構築
+## Commands
 
 ```bash
-python scripts/setup_index.py
+# ローカル起動
+python src/slack/bot.py
+
+# Docker起動（ローカル）
+docker-compose up -d --build
+
+# ドキュメント登録
+python scripts/load_all_documents.py --slack CME3BV4PN    # Slack履歴
+python scripts/load_all_documents.py --files ./documents  # ファイル
+python scripts/load_all_documents.py --all                # 全ソース
+
+# Pineconeインデックス操作
+python scripts/setup_pinecone.py    # インデックス作成
+python scripts/reset_pinecone.py    # インデックス削除
+
+# フィードバック確認
+python scripts/view_feedback.py
+
+# RAGテスト
+python scripts/test_rag_search.py
 ```
 
-### アプリケーション起動
+## AWS Deployment
 
 ```bash
-python src/main.py
+# ECRログイン
+aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 433864970174.dkr.ecr.us-west-2.amazonaws.com
+
+# イメージビルド・プッシュ
+docker build -t slack-ai-assistant:latest .
+docker tag slack-ai-assistant:latest 433864970174.dkr.ecr.us-west-2.amazonaws.com/slack-ai-assistant:latest
+docker push 433864970174.dkr.ecr.us-west-2.amazonaws.com/slack-ai-assistant:latest
+
+# ECSサービス更新（新イメージ反映）
+aws ecs update-service --cluster slack-ai-assistant-cluster --service slack-ai-assistant-service --force-new-deployment --region us-west-2
+
+# ログ確認
+aws logs tail /ecs/slack-ai-assistant --follow --region us-west-2
+
+# CloudFormation再デプロイ
+aws cloudformation deploy --template-file deploy/cloudformation.yml --stack-name slack-ai-assistant --parameter-overrides AppName=slack-ai-assistant ECRImageUri=433864970174.dkr.ecr.us-west-2.amazonaws.com/slack-ai-assistant:latest --capabilities CAPABILITY_NAMED_IAM --region us-west-2
 ```
 
-## トラブルシューティング
+## Architecture
 
-### AWS Bedrock接続エラー
-
-- AWS CLIの設定を確認: `aws configure list`
-- リージョンを確認: us-west-2でClaude 3.5 Sonnetが利用可能
-- Bedrockモデルアクセスを確認: AWSコンソールでモデルアクセスを有効化
-
-### Pinecone接続エラー
-
-- API Keyを確認
-- Index名が正しいか確認
-- Environmentが正しいか確認
-
-### Slack接続エラー
-
-- Bot TokenとApp Tokenを確認
-- Slack Appの権限を確認（chat:write, app_mentions:read等）
-- Socket Modeが有効になっているか確認
-
-## テスト
-
-```bash
-pytest tests/
+### Core Flow
+```
+Slack Message → bot.py → RAGService → Pinecone (検索) → Bedrock Claude (生成) → Slack Reply
 ```
 
-## コーディング規約
+### Key Components
 
-- **フォーマット**: Black
-- **リント**: Flake8
-- **型チェック**: mypy
-- **ドキュメント**: Googleスタイルのdocstring
+**src/slack/bot.py** - メインエントリポイント
+- Socket Mode でSlackイベントを受信
+- `@app.event("message")`: 自動返信（SLACK_AUTO_REPLY_CHANNELS内のみ）
+- `@app.event("app_mention")`: メンション応答
+- `@app.event("reaction_added")`: 👍/👎フィードバック記録
+- 人間が先に返信済みのスレッドはスキップ
 
-## セキュリティ
+**src/rag/rag_service.py** - RAGサービス（シングルトン）
+- `get_rag_service()` で取得
+- `answer_question(question)` → `{"answer": str, "sources": list}`
+- LangChain RetrievalQA + Pinecone + Bedrock
 
-- `.env`ファイルは絶対にコミットしない
-- AWS認証情報は環境変数またはAWS CLI設定で管理
-- Slackトークンは環境変数で管理
-- ログに機密情報を出力しない
+**src/rag/embeddings.py** - Amazon Titan Text Embeddings V2 (1024次元)
+
+**src/llm/bedrock.py** - Claude 3.5 Sonnet (`anthropic.claude-3-5-sonnet-20241022-v2:0`)
+
+**src/loaders/** - ドキュメントローダー
+- `slack_loader.py`: Slack履歴（スレッド単位）
+- `file_loader.py`: PDF/Word/Markdown/テキスト
+- `notion_loader.py`: Notionページ
+
+**config/settings.py** - Pydantic Settings（`.env`から自動読み込み）
+
+### AWS Infrastructure (deploy/cloudformation.yml)
+- **ECS Fargate**: slack-ai-assistant-cluster / slack-ai-assistant-service
+- **ECR**: 433864970174.dkr.ecr.us-west-2.amazonaws.com/slack-ai-assistant
+- **Secrets Manager**: 認証情報（PINECONE_API_KEY, SLACK_*トークン）
+- **CloudWatch Logs**: /ecs/slack-ai-assistant
+- **VPC**: 専用VPC + パブリックサブネット2つ
+
+## Configuration
+
+必須環境変数（.env / Secrets Manager）:
+- `PINECONE_API_KEY`, `PINECONE_ENVIRONMENT`
+- `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET`
+- `SLACK_AUTO_REPLY_CHANNELS`: 自動返信対象チャンネルID（カンマ区切り）
+- AWS認証: AWS CLI設定済み or IAMロール（ECS）
+
+## Slack App Requirements
+
+必要なOAuthスコープ: `chat:write`, `app_mentions:read`, `channels:history`, `reactions:read`
+
+Socket Mode: 有効化必須
