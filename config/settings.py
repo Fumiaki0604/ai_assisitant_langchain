@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     confluence_user_email: Optional[str] = None
 
     # Notion (Optional)
-    notion_api_token: Optional[str] = None
+    notion_api_key: Optional[str] = None
 
     # Application
     log_level: str = "INFO"
