@@ -29,6 +29,10 @@ ENV/
 .env
 .env.local
 
+# Google Drive Credentials
+credentials/
+*.json
+
 # IDE
 .vscode/
 .idea/

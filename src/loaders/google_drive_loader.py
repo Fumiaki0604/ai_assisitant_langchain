@@ -1,0 +1,308 @@
+"""
+Google DriveのファイルをPineconeに登録するローダー
+"""
+import sys
+import os
+import io
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_pinecone import PineconeVectorStore
+from langchain.schema import Document
+from googleapiclient.http import MediaIoBaseDownload
+from src.auth.google_auth import get_google_drive_service
+from src.rag.embeddings import get_embeddings
+from config.settings import settings
+import logging
+
+# PDF/Docx処理用
+from PyPDF2 import PdfReader
+from docx import Document as DocxDocument
+
+logger = logging.getLogger(__name__)
+
+
+class GoogleDriveLoader:
+    """
+    Google DriveのファイルをPineconeに登録するクラス
+    """
+
+    # サポートするMIMEタイプ
+    SUPPORTED_MIME_TYPES = {
+        'application/pdf': 'pdf',
+        'application/vnd.google-apps.document': 'google_doc',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+        'text/plain': 'text',
+        'text/markdown': 'markdown',
+    }
+
+    def __init__(self, credentials_path: str = None, token_path: str = None):
+        """
+        Args:
+            credentials_path: OAuth 2.0 クライアント認証情報JSONファイルのパス
+            token_path: 認証トークンを保存するパス
+        """
+        self.credentials_path = credentials_path or settings.google_drive_credentials_path
+        self.token_path = token_path or settings.google_drive_token_path
+
+        # Google Drive APIサービスを初期化
+        self.service = get_google_drive_service(self.credentials_path, self.token_path)
+
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+        )
+        os.environ["PINECONE_API_KEY"] = settings.pinecone_api_key
+
+    def list_files_in_folder(self, folder_id: str = None) -> list:
+        """
+        指定されたフォルダ内のファイル一覧を取得
+
+        Args:
+            folder_id: Google DriveのフォルダID（Noneの場合は全ファイル）
+
+        Returns:
+            list: ファイル情報のリスト
+        """
+        try:
+            query_parts = []
+
+            if folder_id:
+                query_parts.append(f"'{folder_id}' in parents")
+
+            # サポートするMIMEタイプのみフィルタ
+            mime_type_query = " or ".join(
+                [f"mimeType='{mime}'" for mime in self.SUPPORTED_MIME_TYPES.keys()]
+            )
+            if mime_type_query:
+                query_parts.append(f"({mime_type_query})")
+
+            # ゴミ箱に入っていないファイルのみ
+            query_parts.append("trashed=false")
+
+            query = " and ".join(query_parts)
+
+            results = self.service.files().list(
+                q=query,
+                pageSize=100,
+                fields="files(id, name, mimeType, modifiedTime, webViewLink)"
+            ).execute()
+
+            files = results.get('files', [])
+            logger.info(f"Found {len(files)} files in Google Drive")
+            return files
+
+        except Exception as e:
+            logger.error(f"Failed to list files: {e}")
+            return []
+
+    def download_file_content(self, file_id: str, mime_type: str) -> str:
+        """
+        Google Driveからファイルの内容をダウンロード
+
+        Args:
+            file_id: ファイルID
+            mime_type: ファイルのMIMEタイプ
+
+        Returns:
+            str: ファイルの内容（テキスト）
+        """
+        try:
+            # Google Docsの場合はエクスポート
+            if mime_type == 'application/vnd.google-apps.document':
+                request = self.service.files().export_media(
+                    fileId=file_id,
+                    mimeType='text/plain'
+                )
+            else:
+                request = self.service.files().get_media(fileId=file_id)
+
+            file_buffer = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_buffer, request)
+
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+
+            file_buffer.seek(0)
+
+            # MIMEタイプに応じて内容を抽出
+            if mime_type == 'application/pdf':
+                return self._extract_pdf_text(file_buffer)
+            elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+                return self._extract_docx_text(file_buffer)
+            else:
+                # テキストファイル or Google Docs（プレーンテキストとしてエクスポート済み）
+                return file_buffer.read().decode('utf-8')
+
+        except Exception as e:
+            logger.error(f"Failed to download file {file_id}: {e}")
+            return ""
+
+    def _extract_pdf_text(self, file_buffer: io.BytesIO) -> str:
+        """PDFからテキストを抽出"""
+        try:
+            pdf_reader = PdfReader(file_buffer)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+        except Exception as e:
+            logger.error(f"Failed to extract PDF text: {e}")
+            return ""
+
+    def _extract_docx_text(self, file_buffer: io.BytesIO) -> str:
+        """Docxからテキストを抽出"""
+        try:
+            doc = DocxDocument(file_buffer)
+            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            return text
+        except Exception as e:
+            logger.error(f"Failed to extract DOCX text: {e}")
+            return ""
+
+    def load_file(self, file_info: dict) -> Document:
+        """
+        単一ファイルを読み込み
+
+        Args:
+            file_info: ファイル情報（list_files_in_folderの戻り値の要素）
+
+        Returns:
+            Document: LangChainのDocumentオブジェクト
+        """
+        try:
+            file_id = file_info['id']
+            file_name = file_info['name']
+            mime_type = file_info['mimeType']
+
+            logger.info(f"Loading file: {file_name}")
+
+            # ファイルの内容をダウンロード
+            content = self.download_file_content(file_id, mime_type)
+
+            if not content:
+                logger.warning(f"Empty content for file: {file_name}")
+                return None
+
+            # Documentオブジェクトを作成
+            document = Document(
+                page_content=content,
+                metadata={
+                    "source": "google_drive",
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "mime_type": mime_type,
+                    "modified_time": file_info.get('modifiedTime', ''),
+                    "web_view_link": file_info.get('webViewLink', ''),
+                    "title": file_name
+                }
+            )
+
+            logger.info(f"Loaded {len(content)} characters from {file_name}")
+            return document
+
+        except Exception as e:
+            logger.error(f"Failed to load file {file_info.get('name', 'unknown')}: {e}")
+            return None
+
+    def load_folder(self, folder_id: str = None) -> list:
+        """
+        フォルダ内の全ファイルを読み込み
+
+        Args:
+            folder_id: Google DriveのフォルダID（Noneの場合は全ファイル）
+
+        Returns:
+            list: Documentオブジェクトのリスト
+        """
+        files = self.list_files_in_folder(folder_id)
+
+        documents = []
+        for file_info in files:
+            doc = self.load_file(file_info)
+            if doc:
+                documents.append(doc)
+
+        logger.info(f"Total: Loaded {len(documents)} documents from Google Drive")
+        return documents
+
+    def save_to_pinecone(self, documents: list) -> bool:
+        """
+        ドキュメントをPineconeに保存
+
+        Args:
+            documents: Documentオブジェクトのリスト
+
+        Returns:
+            bool: 成功したかどうか
+        """
+        if not documents:
+            logger.warning("No documents to save")
+            return False
+
+        try:
+            embeddings = get_embeddings()
+
+            all_texts = []
+            all_metadatas = []
+
+            for doc in documents:
+                chunks = self.text_splitter.split_text(doc.page_content)
+                for i, chunk in enumerate(chunks):
+                    all_texts.append(chunk)
+                    metadata = doc.metadata.copy()
+                    metadata["chunk_id"] = i
+                    all_metadatas.append(metadata)
+
+            logger.info(f"Saving {len(all_texts)} chunks to Pinecone...")
+
+            PineconeVectorStore.from_texts(
+                texts=all_texts,
+                embedding=embeddings,
+                metadatas=all_metadatas,
+                index_name=settings.pinecone_index_name
+            )
+
+            logger.info("Documents saved to Pinecone successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save to Pinecone: {e}", exc_info=True)
+            return False
+
+
+def load_documents_from_google_drive(folder_id: str = None):
+    """
+    Google Driveからドキュメントを読み込んでPineconeに保存
+
+    Args:
+        folder_id: Google DriveのフォルダID
+
+    Returns:
+        tuple: (成功したかどうか, ドキュメント数)
+    """
+    loader = GoogleDriveLoader()
+    documents = loader.load_folder(folder_id)
+
+    if documents:
+        success = loader.save_to_pinecone(documents)
+        return success, len(documents)
+    return False, 0
+
+
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
+    folder_id = settings.google_drive_folder_id if hasattr(settings, 'google_drive_folder_id') else None
+
+    print(f"\nGoogle Driveフォルダ: {folder_id or 'すべてのファイル'}")
+
+    success, count = load_documents_from_google_drive(folder_id)
+
+    if success:
+        print(f"\n完了: {count} 件のドキュメントをPineconeに登録しました")
+    else:
+        print("\nエラー: ドキュメントの登録に失敗しました")
