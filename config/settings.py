@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Notion (Optional)
     notion_api_token: Optional[str] = None
 
+    # Google Drive (Optional)
+    google_drive_credentials_path: str = "credentials/google_credentials.json"
+    google_drive_token_path: str = "credentials/google_token.json"
+    google_drive_folder_id: Optional[str] = None
+
     # Application
     log_level: str = "INFO"
     feedback_log_file: str = "logs/feedback.json"
