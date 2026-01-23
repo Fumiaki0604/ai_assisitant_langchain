@@ -8,8 +8,9 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from langchain_pinecone import PineconeVectorStore
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 from src.rag.embeddings import get_embeddings
 from src.llm.bedrock import get_bedrock_llm
 from config.settings import settings
@@ -66,15 +67,9 @@ class RAGService:
             input_variables=["context", "question"]
         )
 
-        # RetrievalQAチェーンを作成
-        self.qa_chain = RetrievalQA.from_chain_type(
-            llm=self.llm,
-            chain_type="stuff",
-            retriever=self.vectorstore.as_retriever(
-                search_kwargs={"k": 3}  # 関連度の高い上位3件を取得
-            ),
-            chain_type_kwargs={"prompt": self.prompt},
-            return_source_documents=True
+        # Retrieverを作成
+        self.retriever = self.vectorstore.as_retriever(
+            search_kwargs={"k": 3}  # 関連度の高い上位3件を取得
         )
 
         logger.info("RAG service initialized successfully")
@@ -95,12 +90,19 @@ class RAGService:
         try:
             logger.info(f"Processing question: {question[:50]}...")
 
-            # RAG検索と回答生成
-            result = self.qa_chain.invoke({"query": question})
+            # 関連ドキュメントを検索
+            source_docs = self.retriever.invoke(question)
 
-            # 回答と参考ドキュメントを抽出
-            answer = result['result']
-            source_docs = result.get('source_documents', [])
+            # コンテキストを構築
+            context = "\n\n".join([doc.page_content for doc in source_docs])
+
+            # プロンプトを生成
+            formatted_prompt = self.prompt.format(context=context, question=question)
+
+            # LLMで回答を生成
+            answer = self.llm.invoke(formatted_prompt)
+            if hasattr(answer, 'content'):
+                answer = answer.content
 
             # 参考ドキュメント情報を整形
             sources = []
@@ -108,7 +110,8 @@ class RAGService:
                 sources.append({
                     "title": doc.metadata.get('title', 'タイトルなし'),
                     "source": doc.metadata.get('source', '不明'),
-                    "content": doc.page_content[:150]  # 最初の150文字
+                    "link": doc.metadata.get('web_view_link', ''),
+                    "content": doc.page_content[:200]  # 該当箇所の引用
                 })
 
             logger.info(f"Answer generated successfully with {len(sources)} source documents")

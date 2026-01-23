@@ -7,9 +7,9 @@ import io
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
-from langchain.schema import Document
+from langchain_core.documents import Document
 from googleapiclient.http import MediaIoBaseDownload
 from src.auth.google_auth import get_google_drive_service
 from src.rag.embeddings import get_embeddings
@@ -55,43 +55,53 @@ class GoogleDriveLoader:
         )
         os.environ["PINECONE_API_KEY"] = settings.pinecone_api_key
 
-    def list_files_in_folder(self, folder_id: str = None) -> list:
+    def list_files_in_folder(self, folder_id: str = None, recursive: bool = True) -> list:
         """
         指定されたフォルダ内のファイル一覧を取得
 
         Args:
             folder_id: Google DriveのフォルダID（Noneの場合は全ファイル）
+            recursive: サブフォルダも再帰的に検索するか
 
         Returns:
             list: ファイル情報のリスト
         """
-        try:
-            query_parts = []
+        all_files = []
 
+        try:
+            # フォルダ内のアイテムを取得（フォルダも含む）
+            query_parts = []
             if folder_id:
                 query_parts.append(f"'{folder_id}' in parents")
-
-            # サポートするMIMEタイプのみフィルタ
-            mime_type_query = " or ".join(
-                [f"mimeType='{mime}'" for mime in self.SUPPORTED_MIME_TYPES.keys()]
-            )
-            if mime_type_query:
-                query_parts.append(f"({mime_type_query})")
-
-            # ゴミ箱に入っていないファイルのみ
             query_parts.append("trashed=false")
-
             query = " and ".join(query_parts)
 
             results = self.service.files().list(
                 q=query,
                 pageSize=100,
-                fields="files(id, name, mimeType, modifiedTime, webViewLink)"
+                fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                corpora='allDrives'
             ).execute()
 
-            files = results.get('files', [])
-            logger.info(f"Found {len(files)} files in Google Drive")
-            return files
+            items = results.get('files', [])
+
+            for item in items:
+                mime_type = item['mimeType']
+
+                # フォルダの場合は再帰的に検索
+                if mime_type == 'application/vnd.google-apps.folder':
+                    if recursive:
+                        logger.info(f"Entering folder: {item['name']}")
+                        sub_files = self.list_files_in_folder(item['id'], recursive=True)
+                        all_files.extend(sub_files)
+                # サポートするファイルタイプの場合はリストに追加
+                elif mime_type in self.SUPPORTED_MIME_TYPES:
+                    all_files.append(item)
+
+            logger.info(f"Found {len(all_files)} files in Google Drive")
+            return all_files
 
         except Exception as e:
             logger.error(f"Failed to list files: {e}")
@@ -116,7 +126,10 @@ class GoogleDriveLoader:
                     mimeType='text/plain'
                 )
             else:
-                request = self.service.files().get_media(fileId=file_id)
+                request = self.service.files().get_media(
+                    fileId=file_id,
+                    supportsAllDrives=True
+                )
 
             file_buffer = io.BytesIO()
             downloader = MediaIoBaseDownload(file_buffer, request)
@@ -228,6 +241,15 @@ class GoogleDriveLoader:
         logger.info(f"Total: Loaded {len(documents)} documents from Google Drive")
         return documents
 
+    def _clean_text(self, text: str) -> str:
+        """不正なUnicode文字を除去"""
+        import re
+        # サロゲートペア（U+D800〜U+DFFF）を除去
+        cleaned = re.sub(r'[\ud800-\udfff]', '', text)
+        # 制御文字を除去（改行・タブは除く）
+        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', cleaned)
+        return cleaned
+
     def save_to_pinecone(self, documents: list) -> bool:
         """
         ドキュメントをPineconeに保存
@@ -249,9 +271,11 @@ class GoogleDriveLoader:
             all_metadatas = []
 
             for doc in documents:
-                chunks = self.text_splitter.split_text(doc.page_content)
+                # テキストをクリーンアップ
+                cleaned_content = self._clean_text(doc.page_content)
+                chunks = self.text_splitter.split_text(cleaned_content)
                 for i, chunk in enumerate(chunks):
-                    all_texts.append(chunk)
+                    all_texts.append(self._clean_text(chunk))
                     metadata = doc.metadata.copy()
                     metadata["chunk_id"] = i
                     all_metadatas.append(metadata)

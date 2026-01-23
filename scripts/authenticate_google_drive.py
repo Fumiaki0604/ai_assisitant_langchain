@@ -31,7 +31,7 @@ def main():
     print(f"トークン保存先: {settings.google_drive_token_path}")
 
     if not os.path.exists(settings.google_drive_credentials_path):
-        print(f"\n❌ エラー: 認証情報ファイルが見つかりません")
+        print(f"\n[エラー] 認証情報ファイルが見つかりません")
         print(f"   {settings.google_drive_credentials_path}")
         return
 
@@ -42,14 +42,13 @@ def main():
 
     try:
         print("\n認証を開始します...")
-        print("\n⚠️  WSL環境では、ブラウザが自動的に開きません")
-        print("    以下のURLを手動でブラウザにコピー&ペーストしてください:\n")
+        print("\n[注意] ブラウザが自動的に開かない場合は、表示されるURLを手動でコピーしてください\n")
 
         # 認証を実行
         creds = auth.authenticate()
 
         if creds and creds.valid:
-            print("\n✅ 認証成功!")
+            print("\n[成功] 認証成功!")
             print(f"トークンが保存されました: {settings.google_drive_token_path}")
 
             # テスト: ファイル一覧を取得
@@ -67,13 +66,13 @@ def main():
                 for file in files[:5]:
                     print(f"  - {file['name']}")
         else:
-            print("\n❌ 認証に失敗しました")
+            print("\n[失敗] 認証に失敗しました")
 
     except KeyboardInterrupt:
         print("\n\n認証がキャンセルされました")
     except Exception as e:
         logger.error(f"エラーが発生しました: {e}", exc_info=True)
-        print(f"\n❌ エラー: {e}")
+        print(f"\n[エラー]: {e}")
 
 
 if __name__ == "__main__":

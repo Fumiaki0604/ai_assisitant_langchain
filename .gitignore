@@ -52,6 +52,11 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+nul
+
+# AWS Credentials
+*accessKeys*.csv
+*.pem
 
 # Pinecone local cache
 .pinecone/

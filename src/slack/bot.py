@@ -124,9 +124,21 @@ def handle_mention(event, say, client):
 
         # 参考ドキュメントがある場合は追記
         if result['sources']:
-            answer_text += "\n\n_参考ドキュメント:_"
-            for i, source in enumerate(result['sources'][:2], 1):  # 最大2件
-                answer_text += f"\n• {source['title']}"
+            answer_text += "\n\n*参考ドキュメント:*"
+            seen_titles = set()
+            for source in result['sources'][:3]:
+                if source['title'] in seen_titles:
+                    continue
+                seen_titles.add(source['title'])
+                # リンク付きタイトル
+                if source.get('link'):
+                    answer_text += f"\n• <{source['link']}|{source['title']}>"
+                else:
+                    answer_text += f"\n• {source['title']}"
+                # 該当箇所の引用
+                if source.get('content'):
+                    excerpt = source['content'][:100].replace('\n', ' ')
+                    answer_text += f"\n  _{excerpt}..._"
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [
@@ -228,9 +240,21 @@ def handle_message_events(event, say, client):
 
         # 参考ドキュメントがある場合は追記
         if result['sources']:
-            answer_text += "\n\n_参考ドキュメント:_"
-            for i, source in enumerate(result['sources'][:2], 1):  # 最大2件
-                answer_text += f"\n• {source['title']}"
+            answer_text += "\n\n*参考ドキュメント:*"
+            seen_titles = set()
+            for source in result['sources'][:3]:
+                if source['title'] in seen_titles:
+                    continue
+                seen_titles.add(source['title'])
+                # リンク付きタイトル
+                if source.get('link'):
+                    answer_text += f"\n• <{source['link']}|{source['title']}>"
+                else:
+                    answer_text += f"\n• {source['title']}"
+                # 該当箇所の引用
+                if source.get('content'):
+                    excerpt = source['content'][:100].replace('\n', ' ')
+                    answer_text += f"\n  _{excerpt}..._"
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [
