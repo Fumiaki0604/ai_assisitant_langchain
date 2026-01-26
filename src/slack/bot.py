@@ -34,6 +34,54 @@ feedback_logger = get_feedback_logger()
 # 自動返信対象チャンネルのリスト
 AUTO_REPLY_CHANNELS = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
 
+# URL抽出用の正規表現
+URL_PATTERN = re.compile(r'https?://[^\s<>]+')
+
+
+def extract_urls(text: str) -> list:
+    """テキストからURLを抽出"""
+    # Slackの<URL|表示テキスト>形式も処理
+    slack_urls = re.findall(r'<(https?://[^|>]+)(?:\|[^>]*)?>',  text)
+    plain_urls = URL_PATTERN.findall(text)
+    return list(set(slack_urls + plain_urls))
+
+
+def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
+    """ソース別の参考ドキュメントセクションをフォーマット"""
+    if is_unable:
+        return ""
+
+    sections = []
+
+    # Slack履歴
+    if sources_by_type.get('slack'):
+        section = "*📝 Slack履歴からの検索結果:*"
+        for src in sources_by_type['slack'][:2]:
+            section += f"\n• {src['title']}"
+        sections.append(section)
+
+    # GoogleDrive（ナレッジ）
+    if sources_by_type.get('drive'):
+        section = "*📁 ナレッジ(GoogleDrive)からの検索結果:*"
+        for src in sources_by_type['drive'][:2]:
+            if src.get('link'):
+                section += f"\n• <{src['link']}|{src['title']}>"
+            else:
+                section += f"\n• {src['title']}"
+        sections.append(section)
+
+    # その他
+    if sources_by_type.get('other'):
+        section = "*📄 その他の参考資料:*"
+        for src in sources_by_type['other'][:2]:
+            if src.get('link'):
+                section += f"\n• <{src['link']}|{src['title']}>"
+            else:
+                section += f"\n• {src['title']}"
+        sections.append(section)
+
+    return "\n\n".join(sections)
+
 
 def has_human_reply(client, channel, thread_ts):
     """
@@ -105,7 +153,6 @@ def handle_mention(event, say, client):
     ボットがメンションされた時の処理
     """
     try:
-        # メンションを取得
         user = event["user"]
         text = event["text"]
         channel = event["channel"]
@@ -116,30 +163,34 @@ def handle_mention(event, say, client):
         # ボットのメンションを削除してクリーンなテキストを取得
         clean_text = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
 
+        # URLがあればコンテンツを取得
+        urls = extract_urls(clean_text)
+        url_content = ""
+        fetched_url = ""
+        if urls:
+            fetched_url = urls[0]
+            logger.info(f"Fetching URL: {fetched_url}")
+            url_content = rag_service.fetch_url_content(fetched_url)
+
         # RAGで回答を生成
         logger.info(f"Processing question with RAG: {clean_text}")
-        result = rag_service.answer_question(clean_text)
+        result = rag_service.answer_question(clean_text, url_content)
 
         # 回答を整形
         answer_text = result['answer']
 
-        # 参考ドキュメントがある場合は追記
-        if result['sources']:
-            answer_text += "\n\n*参考ドキュメント:*"
-            seen_titles = set()
-            for source in result['sources'][:3]:
-                if source['title'] in seen_titles:
-                    continue
-                seen_titles.add(source['title'])
-                # リンク付きタイトル
-                if source.get('link'):
-                    answer_text += f"\n• <{source['link']}|{source['title']}>"
-                else:
-                    answer_text += f"\n• {source['title']}"
-                # 該当箇所の引用
-                if source.get('content'):
-                    excerpt = source['content'][:100].replace('\n', ' ')
-                    answer_text += f"\n  _{excerpt}..._"
+        # 回答可能な場合のみソースを表示
+        sources_section = format_sources_section(
+            result.get('sources_by_type', {}),
+            result.get('is_unable_to_answer', False)
+        )
+
+        # Webからの検索結果（URLをフェッチした場合）
+        if url_content and not result.get('is_unable_to_answer'):
+            sources_section += f"\n\n*🌐 Webからの検索結果:*\n• <{fetched_url}|{fetched_url[:50]}...>"
+
+        if sources_section:
+            answer_text += "\n\n" + sources_section
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [
@@ -233,29 +284,33 @@ def handle_message_events(event, say, client):
         # 新しい質問（スレッドでない）またはまだ誰も返信していないスレッド
         logger.info(f"Auto-replying to message from {user} in channel {channel}: {text}")
 
+        # URLがあればコンテンツを取得
+        urls = extract_urls(text)
+        url_content = ""
+        fetched_url = ""
+        if urls:
+            fetched_url = urls[0]
+            logger.info(f"Fetching URL: {fetched_url}")
+            url_content = rag_service.fetch_url_content(fetched_url)
+
         # RAGで回答を生成
-        result = rag_service.answer_question(text)
+        result = rag_service.answer_question(text, url_content)
 
         # 回答を整形
         answer_text = result['answer']
 
-        # 参考ドキュメントがある場合は追記
-        if result['sources']:
-            answer_text += "\n\n*参考ドキュメント:*"
-            seen_titles = set()
-            for source in result['sources'][:3]:
-                if source['title'] in seen_titles:
-                    continue
-                seen_titles.add(source['title'])
-                # リンク付きタイトル
-                if source.get('link'):
-                    answer_text += f"\n• <{source['link']}|{source['title']}>"
-                else:
-                    answer_text += f"\n• {source['title']}"
-                # 該当箇所の引用
-                if source.get('content'):
-                    excerpt = source['content'][:100].replace('\n', ' ')
-                    answer_text += f"\n  _{excerpt}..._"
+        # 回答可能な場合のみソースを表示
+        sources_section = format_sources_section(
+            result.get('sources_by_type', {}),
+            result.get('is_unable_to_answer', False)
+        )
+
+        # Webからの検索結果（URLをフェッチした場合）
+        if url_content and not result.get('is_unable_to_answer'):
+            sources_section += f"\n\n*🌐 Webからの検索結果:*\n• <{fetched_url}|{fetched_url[:50]}...>"
+
+        if sources_section:
+            answer_text += "\n\n" + sources_section
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [

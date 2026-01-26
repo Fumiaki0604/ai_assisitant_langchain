@@ -3,6 +3,8 @@ RAG（検索拡張生成）サービス
 """
 import sys
 import os
+import re
+import requests
 
 # プロジェクトルートをPythonパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -17,6 +19,14 @@ from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 回答不可を示すフレーズ
+UNABLE_TO_ANSWER_PHRASES = [
+    "提供された情報からは回答できません",
+    "回答できません",
+    "情報がありません",
+    "見つかりませんでした",
+]
 
 
 # RAG用のプロンプトテンプレート
@@ -74,17 +84,71 @@ class RAGService:
 
         logger.info("RAG service initialized successfully")
 
-    def answer_question(self, question: str) -> dict:
+    def _classify_sources(self, source_docs) -> dict:
+        """ソースをカテゴリ別に分類し重複排除"""
+        slack_sources = []
+        drive_sources = []
+        other_sources = []
+        seen_titles = set()
+
+        for doc in source_docs:
+            title = doc.metadata.get('title', 'タイトルなし')
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+
+            source_info = {
+                "title": title,
+                "source": doc.metadata.get('source', '不明'),
+                "link": doc.metadata.get('web_view_link', ''),
+                "content": doc.page_content[:200]
+            }
+
+            source_type = doc.metadata.get('source', '').lower()
+            if source_type == 'slack':
+                slack_sources.append(source_info)
+            elif source_type == 'google_drive':
+                drive_sources.append(source_info)
+            else:
+                other_sources.append(source_info)
+
+        return {
+            "slack": slack_sources,
+            "drive": drive_sources,
+            "other": other_sources
+        }
+
+    def _is_unable_to_answer(self, answer: str) -> bool:
+        """回答不可かどうかを判定"""
+        return any(phrase in answer for phrase in UNABLE_TO_ANSWER_PHRASES)
+
+    def fetch_url_content(self, url: str) -> str:
+        """URLの内容を取得"""
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            # HTMLタグを除去して最初の2000文字を返す
+            text = re.sub(r'<[^>]+>', '', response.text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text[:2000]
+        except Exception as e:
+            logger.error(f"Failed to fetch URL {url}: {e}")
+            return ""
+
+    def answer_question(self, question: str, url_content: str = "") -> dict:
         """
         質問に対してRAGで回答を生成
 
         Args:
             question: 質問文
+            url_content: URLから取得したコンテンツ（オプション）
 
         Returns:
             dict: {
                 "answer": 回答文,
-                "sources": 参考にしたドキュメント情報のリスト
+                "sources_by_type": ソース別の参考ドキュメント,
+                "is_unable_to_answer": 回答不可フラグ
             }
         """
         try:
@@ -94,7 +158,10 @@ class RAGService:
             source_docs = self.retriever.invoke(question)
 
             # コンテキストを構築
-            context = "\n\n".join([doc.page_content for doc in source_docs])
+            context_parts = [doc.page_content for doc in source_docs]
+            if url_content:
+                context_parts.append(f"URLの内容:\n{url_content}")
+            context = "\n\n".join(context_parts)
 
             # プロンプトを生成
             formatted_prompt = self.prompt.format(context=context, question=question)
@@ -104,28 +171,26 @@ class RAGService:
             if hasattr(answer, 'content'):
                 answer = answer.content
 
-            # 参考ドキュメント情報を整形
-            sources = []
-            for doc in source_docs:
-                sources.append({
-                    "title": doc.metadata.get('title', 'タイトルなし'),
-                    "source": doc.metadata.get('source', '不明'),
-                    "link": doc.metadata.get('web_view_link', ''),
-                    "content": doc.page_content[:200]  # 該当箇所の引用
-                })
+            # ソースを分類
+            sources_by_type = self._classify_sources(source_docs)
 
-            logger.info(f"Answer generated successfully with {len(sources)} source documents")
+            # 回答不可判定
+            is_unable = self._is_unable_to_answer(answer)
+
+            logger.info(f"Answer generated (unable={is_unable}), sources: slack={len(sources_by_type['slack'])}, drive={len(sources_by_type['drive'])}")
 
             return {
                 "answer": answer,
-                "sources": sources
+                "sources_by_type": sources_by_type,
+                "is_unable_to_answer": is_unable
             }
 
         except Exception as e:
             logger.error(f"Error in answer_question: {e}", exc_info=True)
             return {
                 "answer": "申し訳ございません。回答の生成中にエラーが発生しました。もう一度お試しください。",
-                "sources": []
+                "sources_by_type": {"slack": [], "drive": [], "other": []},
+                "is_unable_to_answer": True
             }
 
 
