@@ -12,6 +12,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from config.settings import settings
 from src.rag.rag_service import get_rag_service
 from src.feedback.feedback_logger import get_feedback_logger
+from src.loaders.slack_loader import SlackHistoryLoader
 import logging
 import re
 
@@ -456,6 +457,27 @@ def handle_reaction_added(event, client):
         logger.error(f"Error handling reaction: {e}", exc_info=True)
 
 
+def load_slack_history_on_startup():
+    """
+    起動時にSlack履歴をPineconeに登録
+    """
+    if not AUTO_REPLY_CHANNELS:
+        logger.info("No auto-reply channels configured, skipping history load")
+        return
+
+    logger.info(f"Loading Slack history for channels: {AUTO_REPLY_CHANNELS}")
+    loader = SlackHistoryLoader()
+
+    for channel_id in AUTO_REPLY_CHANNELS:
+        try:
+            documents = loader.load_channel_threads(channel_id, limit=200)
+            if documents:
+                loader.save_to_pinecone(documents)
+                logger.info(f"Loaded {len(documents)} documents from channel {channel_id}")
+        except Exception as e:
+            logger.error(f"Failed to load history for channel {channel_id}: {e}")
+
+
 def start_bot():
     """
     ボットを起動
@@ -464,6 +486,9 @@ def start_bot():
     logger.info(f"Bot token: {settings.slack_bot_token[:20]}...")
     logger.info(f"App token: {settings.slack_app_token[:20]}...")
     logger.info(f"Auto-reply channels: {AUTO_REPLY_CHANNELS}")
+
+    # 起動時にSlack履歴を登録
+    load_slack_history_on_startup()
 
     # Socket Modeでボットを起動
     handler = SocketModeHandler(app, settings.slack_app_token)
