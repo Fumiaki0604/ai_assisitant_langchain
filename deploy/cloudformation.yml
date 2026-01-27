@@ -215,6 +215,8 @@ Resources:
               ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/slack-app-token-Wj7pCw
             - Name: SLACK_SIGNING_SECRET
               ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/slack-signing-secret-7uMAGe
+            - Name: COHERE_API_KEY
+              ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/cohere-api-key-3rdnS6
 
   # ECS Service
   ECSService:
