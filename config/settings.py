@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     google_drive_token_path: str = "credentials/google_token.json"
     google_drive_folder_id: Optional[str] = None
 
+    # Cohere (Optional - for Reranking)
+    cohere_api_key: Optional[str] = None
+
     # Application
     log_level: str = "INFO"
     feedback_log_file: str = "logs/feedback.json"

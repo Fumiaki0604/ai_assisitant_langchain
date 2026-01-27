@@ -16,6 +16,9 @@ slack-sdk
 # Vector Database
 pinecone-client
 
+# Reranking
+cohere>=5.0.0
+
 # Document Loaders
 pypdf==5.1.0
 PyPDF2==3.0.1

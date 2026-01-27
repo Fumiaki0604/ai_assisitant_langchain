@@ -5,6 +5,7 @@ import sys
 import os
 import re
 import requests
+from typing import List
 
 # プロジェクトルートをPythonパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -13,10 +14,18 @@ from langchain_pinecone import PineconeVectorStore
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_core.documents import Document
 from src.rag.embeddings import get_embeddings
 from src.llm.bedrock import get_bedrock_llm
 from config.settings import settings
 import logging
+
+# Cohere for Reranking
+try:
+    import cohere
+    COHERE_AVAILABLE = True
+except ImportError:
+    COHERE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +86,16 @@ class RAGService:
             input_variables=["context", "question"]
         )
 
-        # Retrieverを作成
+        # Retrieverを作成（候補を多めに取得してリランキング）
         self.retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": 3}  # 関連度の高い上位3件を取得
+            search_kwargs={"k": 10}
         )
+
+        # Cohere Rerankクライアント
+        self.cohere_client = None
+        if COHERE_AVAILABLE and settings.cohere_api_key:
+            self.cohere_client = cohere.Client(settings.cohere_api_key)
+            logger.info("Cohere Rerank enabled")
 
         logger.info("RAG service initialized successfully")
 
@@ -122,6 +137,47 @@ class RAGService:
         """回答不可かどうかを判定"""
         return any(phrase in answer for phrase in UNABLE_TO_ANSWER_PHRASES)
 
+    def _keyword_score(self, question: str, doc_content: str) -> float:
+        """キーワードマッチングスコアを計算（ハイブリッド検索用）"""
+        question_words = set(re.findall(r'\w+', question.lower()))
+        doc_words = set(re.findall(r'\w+', doc_content.lower()))
+        if not question_words:
+            return 0.0
+        matched = len(question_words & doc_words)
+        return matched / len(question_words)
+
+    def _rerank_documents(self, question: str, docs: List[Document], top_n: int = 3) -> List[Document]:
+        """ドキュメントをリランキング"""
+        if not docs:
+            return docs
+
+        # Cohereでリランキング
+        if self.cohere_client:
+            try:
+                texts = [doc.page_content for doc in docs]
+                response = self.cohere_client.rerank(
+                    model="rerank-multilingual-v3.0",
+                    query=question,
+                    documents=texts,
+                    top_n=top_n
+                )
+                reranked = [docs[r.index] for r in response.results]
+                logger.info(f"Cohere reranked {len(docs)} -> {len(reranked)} docs")
+                return reranked
+            except Exception as e:
+                logger.warning(f"Cohere rerank failed, using hybrid: {e}")
+
+        # フォールバック: ハイブリッドスコア（ベクトル順位 + キーワード）
+        scored_docs = []
+        for i, doc in enumerate(docs):
+            vector_score = 1.0 / (i + 1)  # 順位スコア
+            keyword_score = self._keyword_score(question, doc.page_content)
+            hybrid_score = 0.7 * vector_score + 0.3 * keyword_score
+            scored_docs.append((hybrid_score, doc))
+
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        return [doc for _, doc in scored_docs[:top_n]]
+
     def fetch_url_content(self, url: str) -> str:
         """URLの内容を取得"""
         try:
@@ -154,8 +210,11 @@ class RAGService:
         try:
             logger.info(f"Processing question: {question[:50]}...")
 
-            # 関連ドキュメントを検索
-            source_docs = self.retriever.invoke(question)
+            # 関連ドキュメントを検索（k=10で取得）
+            candidate_docs = self.retriever.invoke(question)
+
+            # リランキングで上位3件を選択
+            source_docs = self._rerank_documents(question, candidate_docs, top_n=3)
 
             # コンテキストを構築
             context_parts = [doc.page_content for doc in source_docs]
@@ -225,4 +284,4 @@ if __name__ == "__main__":
     result = service.answer_question(test_question)
 
     print(f"回答: {result['answer']}\n")
-    print(f"参考ドキュメント数: {len(result['sources'])}")
+    print(f"参考ドキュメント: slack={len(result['sources_by_type']['slack'])}, drive={len(result['sources_by_type']['drive'])}")
