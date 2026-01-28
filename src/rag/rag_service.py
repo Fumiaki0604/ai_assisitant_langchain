@@ -39,18 +39,20 @@ UNABLE_TO_ANSWER_PHRASES = [
 
 
 # RAG用のプロンプトテンプレート
-RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。以下の参考情報を使用して、質問に正確に答えてください。
+RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。参考情報のみを根拠として回答してください。
 
-参考情報:
+## 参考情報
 {context}
 
-質問: {question}
+## 質問
+{question}
 
-回答の際は以下のルールに従ってください:
-- 参考情報に基づいて、具体的かつ正確に答えてください
-- 参考情報に答えがない場合は、「提供された情報からは回答できません。詳しくは担当部署にお問い合わせください。」と答えてください
-- 簡潔で分かりやすい回答を心がけてください
-- 必要に応じて箇条書きを使用してください
+## 回答ルール
+1. 参考情報に記載された内容のみを使用する（推測・一般知識は使わない）
+2. 回答の根拠となる情報源を明示する（例：「〇〇によると...」）
+3. 部分的にしか情報がない場合は、分かる範囲で回答し、不明点を明示する
+4. 情報がない場合は「提供された情報からは回答できません。担当部署にお問い合わせください。」と答える
+5. 箇条書きで構造化し、要点を先に述べる
 
 回答:"""
 
@@ -192,6 +194,38 @@ class RAGService:
             logger.error(f"Failed to fetch URL {url}: {e}")
             return ""
 
+    def web_search(self, query: str, num_results: int = 3) -> list:
+        """DuckDuckGoでWeb検索を実行"""
+        try:
+            # DuckDuckGo HTML検索
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            params = {'q': query, 'kl': 'jp-jp'}
+            response = requests.get(
+                'https://html.duckduckgo.com/html/',
+                params=params,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+
+            # 結果をパース
+            results = []
+            # DuckDuckGoの結果リンクを抽出
+            pattern = r'<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>([^<]+)</a>'
+            matches = re.findall(pattern, response.text)
+
+            for url, title in matches[:num_results]:
+                # URLデコード
+                if url.startswith('//duckduckgo.com/l/?uddg='):
+                    url = requests.utils.unquote(url.split('uddg=')[1].split('&')[0])
+                results.append({'url': url, 'title': title.strip()})
+
+            logger.info(f"Web search found {len(results)} results for: {query[:30]}...")
+            return results
+        except Exception as e:
+            logger.error(f"Web search failed: {e}")
+            return []
+
     def answer_question(self, question: str, url_content: str = "") -> dict:
         """
         質問に対してRAGで回答を生成
@@ -216,10 +250,24 @@ class RAGService:
             # リランキングで上位3件を選択
             source_docs = self._rerank_documents(question, candidate_docs, top_n=3)
 
+            # ソースを分類
+            sources_by_type = self._classify_sources(source_docs)
+
+            # GoogleDrive・Slackに該当がなければWeb検索
+            web_results = []
+            if not sources_by_type['drive'] and not sources_by_type['slack']:
+                logger.info("No internal sources found, performing web search")
+                web_results = self.web_search(question)
+                sources_by_type['web'] = web_results
+
             # コンテキストを構築
             context_parts = [doc.page_content for doc in source_docs]
             if url_content:
                 context_parts.append(f"URLの内容:\n{url_content}")
+            # Web検索結果もコンテキストに追加
+            if web_results:
+                web_context = "Web検索結果:\n" + "\n".join([f"- {r['title']}: {r['url']}" for r in web_results])
+                context_parts.append(web_context)
             context = "\n\n".join(context_parts)
 
             # プロンプトを生成
@@ -230,13 +278,10 @@ class RAGService:
             if hasattr(answer, 'content'):
                 answer = answer.content
 
-            # ソースを分類
-            sources_by_type = self._classify_sources(source_docs)
-
             # 回答不可判定
             is_unable = self._is_unable_to_answer(answer)
 
-            logger.info(f"Answer generated (unable={is_unable}), sources: slack={len(sources_by_type['slack'])}, drive={len(sources_by_type['drive'])}")
+            logger.info(f"Answer generated (unable={is_unable}), sources: slack={len(sources_by_type['slack'])}, drive={len(sources_by_type['drive'])}, web={len(sources_by_type.get('web', []))}")
 
             return {
                 "answer": answer,
@@ -248,7 +293,7 @@ class RAGService:
             logger.error(f"Error in answer_question: {e}", exc_info=True)
             return {
                 "answer": "申し訳ございません。回答の生成中にエラーが発生しました。もう一度お試しください。",
-                "sources_by_type": {"slack": [], "drive": [], "other": []},
+                "sources_by_type": {"slack": [], "drive": [], "other": [], "web": []},
                 "is_unable_to_answer": True
             }
 

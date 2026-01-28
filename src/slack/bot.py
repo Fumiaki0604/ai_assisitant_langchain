@@ -48,37 +48,45 @@ def extract_urls(text: str) -> list:
 
 def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
     """ソース別の参考ドキュメントセクションをフォーマット"""
-    if is_unable:
-        return ""
-
     sections = []
 
-    # Slack履歴
-    if sources_by_type.get('slack'):
-        section = "*📝 Slack履歴からの検索結果:*"
-        for src in sources_by_type['slack'][:2]:
-            section += f"\n• {src['title']}"
-        sections.append(section)
-
-    # GoogleDrive（ナレッジ）
-    if sources_by_type.get('drive'):
-        section = "*📁 ナレッジ(GoogleDrive)からの検索結果:*"
-        for src in sources_by_type['drive'][:2]:
+    # ①ナレッジ(GoogleDrive)
+    drive_sources = sources_by_type.get('drive', [])
+    if drive_sources:
+        count = len(drive_sources)
+        section = f"*①ナレッジ(GoogleDrive)から類似事例を検索*\n{count}件見つかりました。"
+        for src in drive_sources[:3]:
             if src.get('link'):
                 section += f"\n• <{src['link']}|{src['title']}>"
             else:
                 section += f"\n• {src['title']}"
         sections.append(section)
+    else:
+        sections.append("*①ナレッジ(GoogleDrive)から類似事例を検索*\n該当なし")
 
-    # その他
-    if sources_by_type.get('other'):
-        section = "*📄 その他の参考資料:*"
-        for src in sources_by_type['other'][:2]:
+    # ②Slackの過去事例
+    slack_sources = sources_by_type.get('slack', [])
+    if slack_sources:
+        count = len(slack_sources)
+        section = f"*②Slackの過去事例*\n{count}件見つかりました。"
+        for src in slack_sources[:3]:
             if src.get('link'):
                 section += f"\n• <{src['link']}|{src['title']}>"
             else:
                 section += f"\n• {src['title']}"
         sections.append(section)
+    else:
+        sections.append("*②Slackの過去事例*\n該当なし")
+
+    # ③Web検索の結果
+    web_sources = sources_by_type.get('web', [])
+    if web_sources:
+        section = "*③Web検索の結果*"
+        for src in web_sources[:3]:
+            section += f"\n• <{src['url']}|{src['title']}>"
+        sections.append(section)
+    elif is_unable or (not drive_sources and not slack_sources):
+        sections.append("*③Web検索の結果*\n該当なし")
 
     return "\n\n".join(sections)
 
@@ -179,18 +187,14 @@ def handle_mention(event, say, client):
         # 回答を整形
         answer_text = result['answer']
 
-        # 回答可能な場合のみソースを表示
+        # ソースセクションを表示
         sources_section = format_sources_section(
             result.get('sources_by_type', {}),
             result.get('is_unable_to_answer', False)
         )
 
-        # Webからの検索結果（URLをフェッチした場合）
-        if url_content and not result.get('is_unable_to_answer'):
-            sources_section += f"\n\n*🌐 Webからの検索結果:*\n• <{fetched_url}|{fetched_url[:50]}...>"
-
         if sources_section:
-            answer_text += "\n\n" + sources_section
+            answer_text += "\n\n---\n*参考情報*\n" + sources_section
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [
@@ -299,18 +303,14 @@ def handle_message_events(event, say, client):
         # 回答を整形
         answer_text = result['answer']
 
-        # 回答可能な場合のみソースを表示
+        # ソースセクションを表示
         sources_section = format_sources_section(
             result.get('sources_by_type', {}),
             result.get('is_unable_to_answer', False)
         )
 
-        # Webからの検索結果（URLをフェッチした場合）
-        if url_content and not result.get('is_unable_to_answer'):
-            sources_section += f"\n\n*🌐 Webからの検索結果:*\n• <{fetched_url}|{fetched_url[:50]}...>"
-
         if sources_section:
-            answer_text += "\n\n" + sources_section
+            answer_text += "\n\n---\n*参考情報*\n" + sources_section
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [
