@@ -148,10 +148,14 @@ class RAGService:
         matched = len(question_words & doc_words)
         return matched / len(question_words)
 
-    def _rerank_documents(self, question: str, docs: List[Document], top_n: int = 3) -> List[Document]:
-        """ドキュメントをリランキング"""
+    def _rerank_documents(self, question: str, docs: List[Document], top_n: int = 3, min_score: float = 0.3) -> tuple:
+        """ドキュメントをリランキングし、関連度スコアでフィルタリング
+
+        Returns:
+            tuple: (filtered_docs, top_score) - フィルタ済みドキュメントと最高スコア
+        """
         if not docs:
-            return docs
+            return [], 0.0
 
         # Cohereでリランキング
         if self.cohere_client:
@@ -163,9 +167,18 @@ class RAGService:
                     documents=texts,
                     top_n=top_n
                 )
-                reranked = [docs[r.index] for r in response.results]
-                logger.info(f"Cohere reranked {len(docs)} -> {len(reranked)} docs")
-                return reranked
+
+                # スコアでフィルタリング
+                filtered = []
+                top_score = 0.0
+                for r in response.results:
+                    if r.relevance_score >= min_score:
+                        filtered.append(docs[r.index])
+                    if r.relevance_score > top_score:
+                        top_score = r.relevance_score
+
+                logger.info(f"Cohere reranked {len(docs)} -> {len(filtered)} docs (top_score={top_score:.2f}, min={min_score})")
+                return filtered, top_score
             except Exception as e:
                 logger.warning(f"Cohere rerank failed, using hybrid: {e}")
 
@@ -178,7 +191,9 @@ class RAGService:
             scored_docs.append((hybrid_score, doc))
 
         scored_docs.sort(key=lambda x: x[0], reverse=True)
-        return [doc for _, doc in scored_docs[:top_n]]
+        top_score = scored_docs[0][0] if scored_docs else 0.0
+        filtered = [(s, d) for s, d in scored_docs[:top_n] if s >= min_score]
+        return [doc for _, doc in filtered], top_score
 
     def fetch_url_content(self, url: str) -> str:
         """URLの内容を取得"""
@@ -193,6 +208,31 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to fetch URL {url}: {e}")
             return ""
+
+    def _classify_question_type(self, question: str) -> str:
+        """質問が内部製品に関するものか外部サービスに関するものかをLLMで判定"""
+        try:
+            prompt = """以下の質問が「自社製品(ecbeing/メルカート/visumo等)に関する技術的な質問」か「外部サービス/一般的な技術の質問」かを判定してください。
+
+質問: {question}
+
+判定基準:
+- 自社製品の機能、設定、運用、事例に関する質問 → internal
+- Google、Bing、AWS等の外部サービスに関する質問 → external
+- SEO、インデックス、サーバー等の一般技術で自社製品に限定されない質問 → external
+
+回答は「internal」か「external」の1単語のみ:"""
+
+            result = self.llm.invoke(prompt.format(question=question))
+            if hasattr(result, 'content'):
+                result = result.content
+
+            classification = "external" if "external" in result.lower() else "internal"
+            logger.info(f"Question classified as: {classification}")
+            return classification
+        except Exception as e:
+            logger.warning(f"Question classification failed: {e}")
+            return "internal"
 
     def web_search(self, query: str, num_results: int = 3) -> list:
         """DuckDuckGoでWeb検索を実行"""
@@ -247,16 +287,28 @@ class RAGService:
             # 関連ドキュメントを検索（k=10で取得）
             candidate_docs = self.retriever.invoke(question)
 
-            # リランキングで上位3件を選択
-            source_docs = self._rerank_documents(question, candidate_docs, top_n=3)
+            # リランキングで上位3件を選択（関連度スコア0.3未満は除外）
+            source_docs, top_score = self._rerank_documents(question, candidate_docs, top_n=3, min_score=0.3)
 
             # ソースを分類
             sources_by_type = self._classify_sources(source_docs)
 
-            # GoogleDrive・Slackに該当がなければWeb検索
+            # Web検索の判定
             web_results = []
+            should_web_search = False
+
+            # 内部ソースがない、または関連度が低い場合
             if not sources_by_type['drive'] and not sources_by_type['slack']:
-                logger.info("No internal sources found, performing web search")
+                should_web_search = True
+                logger.info("No internal sources found")
+            elif top_score < 0.5:
+                # 関連度が中程度以下の場合、質問タイプで判断
+                question_type = self._classify_question_type(question)
+                if question_type == "external":
+                    should_web_search = True
+                    logger.info(f"Low relevance ({top_score:.2f}) + external question -> web search")
+
+            if should_web_search:
                 web_results = self.web_search(question)
                 sources_by_type['web'] = web_results
 
