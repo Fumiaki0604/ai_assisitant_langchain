@@ -91,6 +91,23 @@ def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
     return "\n\n".join(sections)
 
 
+def format_confidence_indicator(confidence_score: float, grounding_warning: str = None) -> str:
+    """信頼度インジケーターをフォーマット"""
+    if confidence_score >= 0.7:
+        indicator = "🟢 高"
+    elif confidence_score >= 0.4:
+        indicator = "🟡 中"
+    else:
+        indicator = "🔴 低"
+
+    text = f"*回答の信頼度:* {indicator} ({confidence_score:.0%})"
+
+    if grounding_warning:
+        text += f"\n⚠️ {grounding_warning}"
+
+    return text
+
+
 def has_human_reply(client, channel, thread_ts):
     """
     スレッド内に人間（ボット以外）の返信があるかチェック
@@ -187,6 +204,14 @@ def handle_mention(event, say, client):
         # 回答を整形
         answer_text = result['answer']
 
+        # 信頼度インジケーターを追加
+        confidence_section = ""
+        if not result.get('is_unable_to_answer', False):
+            confidence_section = format_confidence_indicator(
+                result.get('confidence_score', 0.0),
+                result.get('grounding_warning')
+            )
+
         # ソースセクションを表示
         sources_section = format_sources_section(
             result.get('sources_by_type', {}),
@@ -195,6 +220,9 @@ def handle_mention(event, say, client):
 
         if sources_section:
             answer_text += "\n\n---\n*参考情報*\n" + sources_section
+
+        if confidence_section:
+            answer_text += "\n\n" + confidence_section
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [
@@ -303,6 +331,14 @@ def handle_message_events(event, say, client):
         # 回答を整形
         answer_text = result['answer']
 
+        # 信頼度インジケーターを追加
+        confidence_section = ""
+        if not result.get('is_unable_to_answer', False):
+            confidence_section = format_confidence_indicator(
+                result.get('confidence_score', 0.0),
+                result.get('grounding_warning')
+            )
+
         # ソースセクションを表示
         sources_section = format_sources_section(
             result.get('sources_by_type', {}),
@@ -311,6 +347,9 @@ def handle_message_events(event, say, client):
 
         if sources_section:
             answer_text += "\n\n---\n*参考情報*\n" + sources_section
+
+        if confidence_section:
+            answer_text += "\n\n" + confidence_section
 
         # Block Kitでフィードバックボタン付きメッセージを送信
         blocks = [

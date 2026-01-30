@@ -234,6 +234,57 @@ class RAGService:
             logger.warning(f"Question classification failed: {e}")
             return "internal"
 
+    def _verify_answer_grounding(self, answer: str, sources: List[Document]) -> dict:
+        """回答がソースに基づいているか検証"""
+        if not sources or not answer:
+            return {"is_grounded": False, "grounding_score": 0.0, "warning": "参考情報なし"}
+
+        try:
+            # ソースの内容を結合
+            source_text = "\n".join([doc.page_content[:500] for doc in sources[:3]])
+
+            prompt = """以下の「回答」が「参考情報」に基づいているか検証してください。
+
+## 参考情報
+{sources}
+
+## 回答
+{answer}
+
+## 検証基準
+- 回答の主張が参考情報に記載されている → grounded
+- 回答が参考情報にない情報を含む（推測・一般知識）→ ungrounded
+- 部分的に基づいている → partial
+
+検証結果を以下の形式で回答:
+結果: [grounded/partial/ungrounded]
+理由: [1行で簡潔に]"""
+
+            result = self.llm.invoke(prompt.format(sources=source_text, answer=answer[:500]))
+            if hasattr(result, 'content'):
+                result = result.content
+
+            # 結果をパース
+            is_grounded = "grounded" in result.lower() and "ungrounded" not in result.lower()
+            is_partial = "partial" in result.lower()
+
+            if is_grounded:
+                grounding_score = 1.0
+                warning = None
+            elif is_partial:
+                grounding_score = 0.5
+                warning = "一部の情報は参考資料に基づいていない可能性があります"
+            else:
+                grounding_score = 0.0
+                warning = "回答が参考資料に基づいていない可能性があります"
+
+            logger.info(f"Answer grounding: {grounding_score:.1f} ({result[:50]}...)")
+            return {"is_grounded": is_grounded or is_partial, "grounding_score": grounding_score, "warning": warning}
+
+        except Exception as e:
+            logger.warning(f"Answer grounding check failed: {e}")
+            return {"is_grounded": True, "grounding_score": 0.5, "warning": None}
+
     def web_search(self, query: str, num_results: int = 3) -> list:
         """DuckDuckGoでWeb検索を実行"""
         try:
@@ -333,12 +384,23 @@ class RAGService:
             # 回答不可判定
             is_unable = self._is_unable_to_answer(answer)
 
-            logger.info(f"Answer generated (unable={is_unable}), sources: slack={len(sources_by_type['slack'])}, drive={len(sources_by_type['drive'])}, web={len(sources_by_type.get('web', []))}")
+            # 回答の整合性検証
+            grounding_result = {"is_grounded": True, "grounding_score": 1.0, "warning": None}
+            if not is_unable and source_docs:
+                grounding_result = self._verify_answer_grounding(answer, source_docs)
+
+            # 信頼度スコアを計算（関連度 × 整合性）
+            confidence_score = top_score * grounding_result["grounding_score"]
+
+            logger.info(f"Answer generated (unable={is_unable}, confidence={confidence_score:.2f}), sources: slack={len(sources_by_type['slack'])}, drive={len(sources_by_type['drive'])}, web={len(sources_by_type.get('web', []))}")
 
             return {
                 "answer": answer,
                 "sources_by_type": sources_by_type,
-                "is_unable_to_answer": is_unable
+                "is_unable_to_answer": is_unable,
+                "confidence_score": confidence_score,
+                "relevance_score": top_score,
+                "grounding_warning": grounding_result.get("warning")
             }
 
         except Exception as e:
