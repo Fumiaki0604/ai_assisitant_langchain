@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     feedback_log_file: str = "logs/feedback.json"
 
+    # Evaluation
+    evaluation_dataset_path: str = "data/evaluation/testset.jsonl"
+    evaluation_results_path: str = "data/evaluation/results"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -256,7 +256,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - ecs:RunTask
-                Resource: !Ref TaskDefinition
+                Resource:
+                  - !Ref TaskDefinition
+                  - !Ref EvaluationTaskDefinition
               - Effect: Allow
                 Action:
                   - iam:PassRole
@@ -293,6 +295,85 @@ Resources:
                 {
                   "name": "${AppName}",
                   "command": ["python", "scripts/sync_pinecone_data.py"]
+                }
+              ]
+            }
+
+  # Evaluation Task Definition (higher memory for RAGAS)
+  EvaluationTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AppName}-evaluation-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '2048'
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref AppName
+          Image: !Ref ECRImageUri
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: evaluation
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: PINECONE_ENVIRONMENT
+              Value: us-east-1
+            - Name: PINECONE_INDEX_NAME
+              Value: slack-ai-assistant
+            - Name: SLACK_AUTO_REPLY_CHANNELS
+              Value: CME3BV4PN,C061Q3XQMPA
+            - Name: GOOGLE_DRIVE_FOLDER_ID
+              Value: 0AC0oLVMcTPpcUk9PVA
+          Secrets:
+            - Name: PINECONE_API_KEY
+              ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/pinecone-api-key-rW3Hb8
+            - Name: SLACK_BOT_TOKEN
+              ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/slack-bot-token-gCxuUB
+            - Name: SLACK_APP_TOKEN
+              ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/slack-app-token-Wj7pCw
+            - Name: SLACK_SIGNING_SECRET
+              ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/slack-signing-secret-7uMAGe
+            - Name: COHERE_API_KEY
+              ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/cohere-api-key-3rdnS6
+
+  # Scheduled Task: Weekly RAGAS Evaluation (Monday 2AM JST = Sunday 17:00 UTC)
+  WeeklyEvaluationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AppName}-weekly-evaluation
+      Description: Weekly RAG evaluation with RAGAS (Monday 2AM JST)
+      ScheduleExpression: cron(0 17 ? * SUN *)
+      State: ENABLED
+      Targets:
+        - Id: !Sub ${AppName}-evaluation-task
+          Arn: !GetAtt ECSCluster.Arn
+          RoleArn: !GetAtt ScheduledTaskRole.Arn
+          EcsParameters:
+            TaskDefinitionArn: !Ref EvaluationTaskDefinition
+            TaskCount: 1
+            LaunchType: FARGATE
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                AssignPublicIp: ENABLED
+                SecurityGroups:
+                  - !Ref ECSSecurityGroup
+                Subnets:
+                  - !Ref PublicSubnet1
+                  - !Ref PublicSubnet2
+          Input: !Sub |
+            {
+              "containerOverrides": [
+                {
+                  "name": "${AppName}",
+                  "command": ["python", "scripts/evaluate_rag.py"]
                 }
               ]
             }
