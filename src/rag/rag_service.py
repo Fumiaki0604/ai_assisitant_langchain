@@ -15,6 +15,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
 from src.rag.embeddings import get_embeddings
 from src.llm.bedrock import get_bedrock_llm
 from config.settings import settings
@@ -390,13 +391,35 @@ class RAGService:
             logger.error(f"Web search failed: {e}")
             return []
 
-    def answer_question(self, question: str, url_content: str = "") -> dict:
+    def _invoke_with_images(self, text_prompt: str, images: list) -> str:
+        """画像付きプロンプトでLLMを呼び出し"""
+        content_blocks = []
+
+        for img in images:
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["base64_data"],
+                }
+            })
+
+        content_blocks.append({"type": "text", "text": text_prompt})
+
+        result = self.llm.invoke([HumanMessage(content=content_blocks)])
+        if hasattr(result, 'content'):
+            return result.content
+        return result
+
+    def answer_question(self, question: str, url_content: str = "", images: list = None) -> dict:
         """
         質問に対してRAGで回答を生成
 
         Args:
             question: 質問文
             url_content: URLから取得したコンテンツ（オプション）
+            images: 画像データリスト [{"base64_data": str, "media_type": str, "name": str}, ...]
 
         Returns:
             dict: {
@@ -468,9 +491,12 @@ class RAGService:
                 formatted_prompt = self.prompt.format(context=context, question=question)
 
             # LLMで回答を生成
-            answer = self.llm.invoke(formatted_prompt)
-            if hasattr(answer, 'content'):
-                answer = answer.content
+            if images:
+                answer = self._invoke_with_images(formatted_prompt, images)
+            else:
+                answer = self.llm.invoke(formatted_prompt)
+                if hasattr(answer, 'content'):
+                    answer = answer.content
 
             # 回答不可判定
             is_unable = self._is_unable_to_answer(answer)

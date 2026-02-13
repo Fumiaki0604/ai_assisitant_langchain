@@ -13,6 +13,7 @@ from config.settings import settings
 from src.rag.rag_service import get_rag_service
 from src.feedback.feedback_logger import get_feedback_logger
 from src.loaders.slack_loader import SlackHistoryLoader
+from src.slack.image_handler import fetch_images_from_event
 import logging
 import re
 
@@ -188,6 +189,9 @@ def handle_mention(event, say, client):
         # ボットのメンションを削除してクリーンなテキストを取得
         clean_text = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
 
+        # 画像ファイルを取得
+        images = fetch_images_from_event(event, settings.slack_bot_token)
+
         # メッセージの意図を分類（質問 vs 共有・連絡）
         intent_result = rag_service.classify_message_intent(clean_text)
 
@@ -208,7 +212,7 @@ def handle_mention(event, say, client):
 
         # RAGで回答を生成
         logger.info(f"Processing question with RAG: {clean_text}")
-        result = rag_service.answer_question(clean_text, url_content)
+        result = rag_service.answer_question(clean_text, url_content, images=images)
 
         # 回答を整形
         answer_text = result['answer']
@@ -325,6 +329,9 @@ def handle_message_events(event, say, client):
         # 新しい質問（スレッドでない）またはまだ誰も返信していないスレッド
         logger.info(f"Auto-replying to message from {user} in channel {channel}: {text}")
 
+        # 画像ファイルを取得
+        images = fetch_images_from_event(event, settings.slack_bot_token)
+
         # メッセージの意図を分類（質問 vs 共有・連絡）
         intent_result = rag_service.classify_message_intent(text)
 
@@ -343,7 +350,7 @@ def handle_message_events(event, say, client):
             url_content = rag_service.fetch_url_content(fetched_url)
 
         # RAGで回答を生成
-        result = rag_service.answer_question(text, url_content)
+        result = rag_service.answer_question(text, url_content, images=images)
 
         # 回答を整形
         answer_text = result['answer']
