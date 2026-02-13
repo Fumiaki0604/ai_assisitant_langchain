@@ -188,6 +188,15 @@ def handle_mention(event, say, client):
         # ボットのメンションを削除してクリーンなテキストを取得
         clean_text = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
 
+        # メッセージの意図を分類（質問 vs 共有・連絡）
+        intent_result = rag_service.classify_message_intent(clean_text)
+
+        if intent_result["intent"] == "share":
+            # 共有・連絡にはリアクションのみ返す
+            say(text=intent_result["acknowledgment"], thread_ts=thread_ts)
+            logger.info(f"Acknowledgment sent to {user} (share message)")
+            return
+
         # URLがあればコンテンツを取得
         urls = extract_urls(clean_text)
         url_content = ""
@@ -315,6 +324,14 @@ def handle_message_events(event, say, client):
 
         # 新しい質問（スレッドでない）またはまだ誰も返信していないスレッド
         logger.info(f"Auto-replying to message from {user} in channel {channel}: {text}")
+
+        # メッセージの意図を分類（質問 vs 共有・連絡）
+        intent_result = rag_service.classify_message_intent(text)
+
+        if intent_result["intent"] == "share":
+            say(text=intent_result["acknowledgment"], thread_ts=thread_ts or ts)
+            logger.info(f"Acknowledgment sent (share message)")
+            return
 
         # URLがあればコンテンツを取得
         urls = extract_urls(text)

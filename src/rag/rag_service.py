@@ -38,8 +38,8 @@ UNABLE_TO_ANSWER_PHRASES = [
 ]
 
 
-# RAG用のプロンプトテンプレート
-RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。参考情報のみを根拠として回答してください。
+# RAG用のプロンプトテンプレート（社内ナレッジが十分にある場合）
+RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。参考情報を根拠として回答してください。
 
 ## 参考情報
 {context}
@@ -48,10 +48,34 @@ RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。参�
 {question}
 
 ## 回答ルール
-1. 参考情報に記載された内容のみを使用する（推測・一般知識は使わない）
+1. 参考情報に記載された内容を主な根拠とする
 2. 回答の根拠となる情報源を明示する（例：「〇〇によると...」）
 3. 部分的にしか情報がない場合は、分かる範囲で回答し、不明点を明示する
-4. 情報がない場合は「提供された情報からは回答できません。担当部署にお問い合わせください。」と答える
+4. 情報がない場合は「提供された参考情報の中には該当する内容が見つかりませんでした。」とだけ答える（問い合わせ先の提案や代替手段の案内は不要）
+5. 箇条書きで構造化し、要点を先に述べる
+
+回答:"""
+
+# Web検索フォールバック用プロンプト（社内ナレッジが不十分な場合）
+WEB_FALLBACK_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。社内ナレッジに十分な情報がなかったため、一般知識とWeb検索結果を活用して回答します。
+
+## Web検索結果
+{web_context}
+
+## 社内参考情報
+{internal_context}
+
+## 質問
+{question}
+
+## 回答ルール
+1. 質問者が求めているのは「正解」ではなく「判断の軸・考え方の整理」であることが多い。思考停止せず、一次回答として8割の腹落ちを目指す
+2. 以下の3層構造で回答する：
+   - 一般論・業界の共通認識（Web検索結果や一般知識を活用）
+   - 当社視点での見解・仮説（社内情報があればそれを根拠に、なければ「当社の実績データは未確認ですが」と前置きして仮説を提示）
+   - 判断軸の整理（どういう条件ならA、どういう条件ならBか）
+3. 断定しなくてよい。整理することに価値がある
+4. 社内実績データがない部分は正直に「社内の実績データとしては未確認です」と線を引く（ただしそれを理由に回答全体を放棄しない）
 5. 箇条書きで構造化し、要点を先に述べる
 
 回答:"""
@@ -87,10 +111,15 @@ class RAGService:
             template=RAG_PROMPT_TEMPLATE,
             input_variables=["context", "question"]
         )
+        self.web_fallback_prompt = PromptTemplate(
+            template=WEB_FALLBACK_PROMPT_TEMPLATE,
+            input_variables=["web_context", "internal_context", "question"]
+        )
 
-        # Retrieverを作成（候補を多めに取得してリランキング）
+        # Retrieverを作成（類似度スコア閾値でフィルタリング）
         self.retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": 10}
+            search_type="similarity_score_threshold",
+            search_kwargs={"k": 10, "score_threshold": 0.5}
         )
 
         # Cohere Rerankクライアント
@@ -148,7 +177,7 @@ class RAGService:
         matched = len(question_words & doc_words)
         return matched / len(question_words)
 
-    def _rerank_documents(self, question: str, docs: List[Document], top_n: int = 3, min_score: float = 0.3) -> tuple:
+    def _rerank_documents(self, question: str, docs: List[Document], top_n: int = 3, min_score: float = 0.5) -> tuple:
         """ドキュメントをリランキングし、関連度スコアでフィルタリング
 
         Returns:
@@ -208,6 +237,44 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to fetch URL {url}: {e}")
             return ""
+
+    def classify_message_intent(self, message: str) -> dict:
+        """メッセージが質問か共有・連絡かを判定し、共有の場合は短い応答を生成"""
+        try:
+            prompt = """以下のメッセージの意図を判定してください。
+
+メッセージ: {message}
+
+判定基準:
+- 質問・相談・依頼（回答や調査が必要） → question
+- 情報共有・連絡・報告・お知らせ（回答不要、リアクションのみ） → share
+
+回答は「question」か「share」の1単語のみ:"""
+
+            result = self.llm.invoke(prompt.format(message=message[:500]))
+            if hasattr(result, 'content'):
+                result = result.content
+
+            intent = "share" if "share" in result.strip().lower() else "question"
+            logger.info(f"Message intent: {intent}")
+
+            if intent == "share":
+                ack_prompt = """以下の社内Slackメッセージに対し、共有への感謝や前向きなリアクションを1〜2文で返してください。
+丁寧すぎず、同僚に話すような自然なトーンで。絵文字は使わない。
+
+メッセージ: {message}
+
+応答:"""
+                ack = self.llm.invoke(ack_prompt.format(message=message[:500]))
+                if hasattr(ack, 'content'):
+                    ack = ack.content
+                return {"intent": "share", "acknowledgment": ack.strip()}
+
+            return {"intent": "question"}
+
+        except Exception as e:
+            logger.warning(f"Message intent classification failed: {e}")
+            return {"intent": "question"}
 
     def _classify_question_type(self, question: str) -> str:
         """質問が内部製品に関するものか外部サービスに関するものかをLLMで判定"""
@@ -285,8 +352,8 @@ class RAGService:
             logger.warning(f"Answer grounding check failed: {e}")
             return {"is_grounded": True, "grounding_score": 0.5, "warning": None}
 
-    def web_search(self, query: str, num_results: int = 3) -> list:
-        """DuckDuckGoでWeb検索を実行"""
+    def web_search(self, query: str, num_results: int = 3, fetch_content: bool = True) -> list:
+        """DuckDuckGoでWeb検索を実行し、上位結果のコンテンツも取得"""
         try:
             # DuckDuckGo HTML検索
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -310,6 +377,12 @@ class RAGService:
                 if url.startswith('//duckduckgo.com/l/?uddg='):
                     url = requests.utils.unquote(url.split('uddg=')[1].split('&')[0])
                 results.append({'url': url, 'title': title.strip()})
+
+            # 上位結果のコンテンツを取得
+            if fetch_content:
+                for result in results[:2]:
+                    content = self.fetch_url_content(result['url'])
+                    result['content'] = content
 
             logger.info(f"Web search found {len(results)} results for: {query[:30]}...")
             return results
@@ -338,8 +411,8 @@ class RAGService:
             # 関連ドキュメントを検索（k=10で取得）
             candidate_docs = self.retriever.invoke(question)
 
-            # リランキングで上位3件を選択（関連度スコア0.3未満は除外）
-            source_docs, top_score = self._rerank_documents(question, candidate_docs, top_n=3, min_score=0.3)
+            # リランキングで上位3件を選択（関連度スコア0.5未満は除外）
+            source_docs, top_score = self._rerank_documents(question, candidate_docs, top_n=3, min_score=0.5)
 
             # ソースを分類
             sources_by_type = self._classify_sources(source_docs)
@@ -363,18 +436,36 @@ class RAGService:
                 web_results = self.web_search(question)
                 sources_by_type['web'] = web_results
 
-            # コンテキストを構築
-            context_parts = [doc.page_content for doc in source_docs]
-            if url_content:
-                context_parts.append(f"URLの内容:\n{url_content}")
-            # Web検索結果もコンテキストに追加
-            if web_results:
-                web_context = "Web検索結果:\n" + "\n".join([f"- {r['title']}: {r['url']}" for r in web_results])
-                context_parts.append(web_context)
-            context = "\n\n".join(context_parts)
+            # プロンプト選択とコンテキスト構築
+            use_web_fallback = should_web_search and web_results
 
-            # プロンプトを生成
-            formatted_prompt = self.prompt.format(context=context, question=question)
+            if use_web_fallback:
+                # Web検索フォールバック: コンテンツ込みのコンテキストを構築
+                web_context_parts = []
+                for r in web_results:
+                    entry = f"### {r['title']}\nURL: {r['url']}"
+                    if r.get('content'):
+                        entry += f"\n{r['content']}"
+                    web_context_parts.append(entry)
+                web_context = "\n\n".join(web_context_parts)
+
+                internal_context_parts = [doc.page_content for doc in source_docs]
+                if url_content:
+                    internal_context_parts.append(f"URLの内容:\n{url_content}")
+                internal_context = "\n\n".join(internal_context_parts) if internal_context_parts else "該当する社内情報なし"
+
+                formatted_prompt = self.web_fallback_prompt.format(
+                    web_context=web_context,
+                    internal_context=internal_context,
+                    question=question
+                )
+            else:
+                # 通常RAG: 社内ナレッジベース
+                context_parts = [doc.page_content for doc in source_docs]
+                if url_content:
+                    context_parts.append(f"URLの内容:\n{url_content}")
+                context = "\n\n".join(context_parts)
+                formatted_prompt = self.prompt.format(context=context, question=question)
 
             # LLMで回答を生成
             answer = self.llm.invoke(formatted_prompt)
@@ -384,13 +475,16 @@ class RAGService:
             # 回答不可判定
             is_unable = self._is_unable_to_answer(answer)
 
-            # 回答の整合性検証
+            # 回答の整合性検証（Web検索フォールバック時はスキップ — 一般知識ベースのため）
             grounding_result = {"is_grounded": True, "grounding_score": 1.0, "warning": None}
-            if not is_unable and source_docs:
+            if not use_web_fallback and not is_unable and source_docs:
                 grounding_result = self._verify_answer_grounding(answer, source_docs)
 
-            # 信頼度スコアを計算（関連度 × 整合性）
-            confidence_score = top_score * grounding_result["grounding_score"]
+            # 信頼度スコアを計算
+            if use_web_fallback:
+                confidence_score = 0.7  # Web検索ベースの固定スコア
+            else:
+                confidence_score = top_score * grounding_result["grounding_score"]
 
             logger.info(f"Answer generated (unable={is_unable}, confidence={confidence_score:.2f}), sources: slack={len(sources_by_type['slack'])}, drive={len(sources_by_type['drive'])}, web={len(sources_by_type.get('web', []))}")
 
