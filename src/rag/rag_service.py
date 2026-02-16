@@ -445,22 +445,23 @@ class RAGService:
             should_web_search = False
 
             # 内部ソースがない、または関連度が低い場合
-            if not sources_by_type['drive'] and not sources_by_type['slack']:
+            has_internal_sources = sources_by_type['drive'] or sources_by_type['slack']
+            if not has_internal_sources:
+                # 内部ソースが完全にゼロ → 質問タイプに関係なくWeb検索
                 should_web_search = True
-                logger.info("No internal sources found")
+                logger.info("No internal sources found -> web search")
             elif top_score < 0.5:
-                # 関連度が中程度以下の場合、質問タイプで判断
-                question_type = self._classify_question_type(question)
-                if question_type == "external":
-                    should_web_search = True
-                    logger.info(f"Low relevance ({top_score:.2f}) + external question -> web search")
+                # 関連度が低い場合もWeb検索で補完
+                should_web_search = True
+                logger.info(f"Low relevance ({top_score:.2f}) -> web search")
 
             if should_web_search:
                 web_results = self.web_search(question)
                 sources_by_type['web'] = web_results
 
             # プロンプト選択とコンテキスト構築
-            use_web_fallback = should_web_search and web_results
+            # 内部ソースが不十分なら、Web検索結果の有無に関わらず柔軟プロンプトを使う
+            use_web_fallback = should_web_search
 
             if use_web_fallback:
                 # Web検索フォールバック: コンテンツ込みのコンテキストを構築
