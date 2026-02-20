@@ -46,7 +46,7 @@ def load_all(slack_channels: list = None, documents_dir: str = None, include_not
         print(f"  -> {count} 件登録")
 
     # Notion
-    if include_notion and settings.notion_api_token:
+    if include_notion and getattr(settings, 'notion_api_key', None):
         print("\n" + "="*50)
         print("Notionページを読み込み中...")
         print("="*50)

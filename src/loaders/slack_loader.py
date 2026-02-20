@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
 from src.rag.embeddings import get_embeddings
 from config.settings import settings
@@ -44,7 +44,8 @@ class SlackHistoryLoader:
         """ユーザー名を取得"""
         try:
             result = self.client.users_info(user=user_id)
-            return result["user"]["real_name"] or result["user"]["name"]
+            user = result["user"]
+            return user.get("real_name") or user.get("display_name") or user.get("name") or user_id
         except SlackApiError as e:
             logger.error(f"Failed to get user name: {e}")
             return user_id

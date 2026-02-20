@@ -6,7 +6,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.document_loaders import NotionDBLoader
 from src.rag.embeddings import get_embeddings
@@ -42,7 +42,7 @@ class NotionLoader:
 
     def search_pages(self, query: str = None) -> list:
         """
-        Notionページを検索
+        Notionページを検索（ページネーション対応で全件取得）
         """
         url = "https://api.notion.com/v1/search"
         payload = {
@@ -52,19 +52,25 @@ class NotionLoader:
         if query:
             payload["query"] = query
 
+        all_pages = []
         try:
-            response = requests.post(url, headers=self.headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            pages = data.get("results", [])
-            print(f"[DEBUG] Found {len(pages)} pages in Notion")
+            while True:
+                response = requests.post(url, headers=self.headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                pages = data.get("results", [])
+                all_pages.extend(pages)
 
-            # デバッグ: 取得したページのタイトルを表示
-            for page in pages:
+                if not data.get("has_more"):
+                    break
+                payload["start_cursor"] = data.get("next_cursor")
+
+            print(f"[DEBUG] Found {len(all_pages)} pages in Notion")
+            for page in all_pages:
                 title = self.get_page_title(page)
                 print(f"  - Page found: {title} (ID: {page.get('id')})")
 
-            return pages
+            return all_pages
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to search Notion pages: {e}")
             return []
