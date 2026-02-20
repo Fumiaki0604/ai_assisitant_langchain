@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.loaders.slack_loader import SlackHistoryLoader
 from src.loaders.google_drive_loader import GoogleDriveLoader
+from src.loaders.notion_loader import NotionLoader
 from config.settings import settings
 import logging
 
@@ -57,14 +58,35 @@ def sync_google_drive():
     return 0
 
 
+def sync_notion():
+    """Notionを同期"""
+    notion_api_key = getattr(settings, 'notion_api_key', None)
+    if not notion_api_key:
+        logger.info("NOTION_API_KEY not configured, skipping Notion sync")
+        return 0
+
+    try:
+        loader = NotionLoader()
+        documents = loader.load_pages(limit=50)
+        if documents:
+            loader.save_to_pinecone(documents)
+            logger.info(f"Synced {len(documents)} documents from Notion")
+            return len(documents)
+    except Exception as e:
+        logger.error(f"Failed to sync Notion: {e}")
+
+    return 0
+
+
 def main():
     """メイン処理"""
     logger.info("Starting Pinecone data sync...")
 
     slack_count = sync_slack_history()
     drive_count = sync_google_drive()
+    notion_count = sync_notion()
 
-    logger.info(f"Sync completed: Slack={slack_count}, GoogleDrive={drive_count}")
+    logger.info(f"Sync completed: Slack={slack_count}, GoogleDrive={drive_count}, Notion={notion_count}")
 
 
 if __name__ == "__main__":
