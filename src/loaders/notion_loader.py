@@ -11,8 +11,10 @@ from langchain_pinecone import PineconeVectorStore
 from langchain_community.document_loaders import NotionDBLoader
 from src.rag.embeddings import get_embeddings
 from config.settings import settings
+import io
 import logging
 import requests
+from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +133,64 @@ class NotionLoader:
 
         return ""
 
+    def _extract_pdf_urls_from_properties(self, page: dict) -> list:
+        """
+        ページプロパティから PDF URL を抽出する
+        URL型・リッチテキスト型のプロパティを走査して .pdf で終わるURLを収集
+        """
+        pdf_urls = []
+        properties = page.get("properties", {})
+
+        for prop_name, prop_value in properties.items():
+            prop_type = prop_value.get("type")
+
+            if prop_type == "url":
+                url = prop_value.get("url")
+                if url and ".pdf" in url.lower():
+                    pdf_urls.append(url)
+                    logger.info(f"PDF URL found in property '{prop_name}': {url}")
+
+            elif prop_type == "rich_text":
+                for text_item in prop_value.get("rich_text", []):
+                    link = text_item.get("text", {}).get("link") or {}
+                    href = link.get("url", "") or text_item.get("href", "") or ""
+                    if href and ".pdf" in href.lower():
+                        pdf_urls.append(href)
+                        logger.info(f"PDF URL found in rich_text property '{prop_name}': {href}")
+
+        return pdf_urls
+
+    def _extract_text_from_pdf_url(self, pdf_url: str, title: str = "") -> str:
+        """
+        PDF URL からテキストを抽出する
+        requests でダウンロードし pypdf でテキスト化
+        """
+        try:
+            logger.info(f"PDFダウンロード中: {pdf_url}")
+            response = requests.get(
+                pdf_url,
+                timeout=30,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            response.raise_for_status()
+
+            reader = PdfReader(io.BytesIO(response.content))
+            pages_text = []
+            for pdf_page in reader.pages:
+                text = pdf_page.extract_text()
+                if text:
+                    pages_text.append(text)
+
+            full_text = "\n".join(pages_text)
+            logger.info(
+                f"PDF '{title}' テキスト抽出完了: {len(reader.pages)} ページ, {len(full_text)} 文字"
+            )
+            return full_text
+
+        except Exception as e:
+            logger.warning(f"PDFテキスト抽出失敗 ({pdf_url}): {e}")
+            return ""
+
     def get_page_title(self, page: dict) -> str:
         """
         ページタイトルを取得
@@ -158,9 +218,25 @@ class NotionLoader:
             title = self.get_page_title(page)
             url = page.get("url", "")
 
-            # ページコンテンツを取得
+            # ページブロックのテキストを取得
             content = self.get_page_content(page_id)
-            print(f"[DEBUG] Page '{title}': content length = {len(content)}")
+
+            # プロパティに埋め込まれた PDF URL を取得してテキスト抽出
+            pdf_urls = self._extract_pdf_urls_from_properties(page)
+            pdf_texts = []
+            for pdf_url in pdf_urls:
+                pdf_text = self._extract_text_from_pdf_url(pdf_url, title)
+                if pdf_text:
+                    pdf_texts.append(pdf_text)
+
+            if pdf_texts:
+                pdf_combined = "\n\n".join(pdf_texts)
+                content = f"{content}\n\n{pdf_combined}" if content else pdf_combined
+
+            print(
+                f"[DEBUG] Page '{title}': content={len(content)}文字, "
+                f"PDF={len(pdf_urls)}件"
+            )
 
             if content:
                 documents.append({
@@ -169,10 +245,11 @@ class NotionLoader:
                         "source": "notion",
                         "page_id": page_id,
                         "title": f"Notion: {title}",
-                        "url": url
+                        "url": url,
+                        "pdf_count": len(pdf_urls)
                     }
                 })
-                logger.info(f"Loaded page: {title}")
+                logger.info(f"Loaded page: {title} (PDF: {len(pdf_urls)}件)")
 
         logger.info(f"Total: Loaded {len(documents)} pages from Notion")
         return documents
@@ -251,8 +328,20 @@ def load_notion_page_by_id(page_id: str):
         page_url = page.get("url", "")
         content = loader.get_page_content(page_id, debug=True)
 
+        # プロパティに埋め込まれた PDF URL を取得してテキスト抽出
+        pdf_urls = loader._extract_pdf_urls_from_properties(page)
+        pdf_texts = []
+        for pdf_url in pdf_urls:
+            pdf_text = loader._extract_text_from_pdf_url(pdf_url, title)
+            if pdf_text:
+                pdf_texts.append(pdf_text)
+
+        if pdf_texts:
+            pdf_combined = "\n\n".join(pdf_texts)
+            content = f"{content}\n\n{pdf_combined}" if content else pdf_combined
+
         if not content:
-            print(f"ページ '{title}' にはコンテンツがありません")
+            print(f"ページ '{title}' にはコンテンツがありません（ブロックもPDFも取得できず）")
             return False, 0
 
         documents = [{
@@ -261,11 +350,15 @@ def load_notion_page_by_id(page_id: str):
                 "source": "notion",
                 "page_id": page_id,
                 "title": f"Notion: {title}",
-                "url": page_url
+                "url": page_url,
+                "pdf_count": len(pdf_urls)
             }
         }]
 
-        print(f"ページ '{title}' を読み込みました (コンテンツ長: {len(content)})")
+        print(
+            f"ページ '{title}' を読み込みました "
+            f"(コンテンツ長: {len(content)}, PDF: {len(pdf_urls)}件)"
+        )
 
         success = loader.save_to_pinecone(documents)
         return success, 1 if success else 0

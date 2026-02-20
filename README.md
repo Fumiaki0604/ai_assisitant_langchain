@@ -48,6 +48,7 @@ Slack Reply（参考情報 + 信頼度スコア + フィードバックボタン
 - **フィードバック**: 👍/👎 ボタン・リアクションで回答品質を記録
 - **人間優先**: 人間が先に返信済みのスレッドはスキップ
 - **複数データソース**: Slack履歴 / Google Drive / Notion / PDF / Markdown
+- **NotionPDF自動取得**: NotionデータベースのURLプロパティに格納されたPDF（外部CDN含む）を自動ダウンロードしてRAGに取り込む
 
 ## セットアップ
 
@@ -90,6 +91,19 @@ python scripts/setup_pinecone.py
 python scripts/load_all_documents.py --slack CME3BV4PN    # Slack履歴
 python scripts/load_all_documents.py --files ./documents  # ファイル
 python scripts/load_all_documents.py --all                # 全ソース
+```
+
+Notionの取り込み（単体実行）:
+
+```bash
+# 全ページを取り込む
+python src/loaders/notion_loader.py
+
+# 特定ページIDを指定して取り込む
+python src/loaders/notion_loader.py <PAGE_ID>
+
+# キーワードで検索して取り込む
+python src/loaders/notion_loader.py --search "ホワイトペーパー"
 ```
 
 ### 5. 起動
@@ -137,6 +151,55 @@ aws ecs update-service --cluster slack-ai-assistant-cluster --service slack-ai-a
 # ログ確認
 aws logs tail /ecs/slack-ai-assistant --follow --region us-west-2
 ```
+
+## Notionデータソースについて
+
+### NotionデータベースのPDF取り込み
+
+Notionデータベースにはページ本文（ブロック）だけでなく、URLプロパティとしてPDFリンクが格納されているケースがある（HubSpot CDN等の外部ホスティングPDFなど）。
+
+`src/loaders/notion_loader.py` は以下の2段階でコンテンツを取得する:
+
+```
+Notionページ
+  ├─ ブロックAPI → 本文テキストを取得
+  └─ プロパティAPI → URLプロパティ・リッチテキストプロパティを走査
+                      ↓ .pdf を含むURLを検出
+                      PDFをダウンロード（requests）
+                      ↓
+                      pypdf でテキスト抽出
+                      ↓
+                      ブロックテキストと結合 → Pineconeへ
+```
+
+#### 対応するNotionプロパティ型
+
+| プロパティ型 | 対応 | 備考 |
+|---|---|---|
+| `url` | ✅ | URL直接入力フィールド |
+| `rich_text` | ✅ | リンク付きテキストフィールド |
+| ブロック本文 | ✅ | 段落・見出し・コード等 |
+
+#### Notionの統合設定
+
+NOTION_API_KEY（インテグレーションのシークレット）を `.env` に設定し、取り込み対象のデータベース・ページにそのインテグレーションのアクセス権を付与する。
+
+```env
+NOTION_API_KEY=secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### メッセージ意図分類の挙動
+
+ボットは受信メッセージを `question`（質問）/ `share`（共有・報告）に分類してから応答を決定する。
+
+| 分類 | 投稿例 | ボットの動作 |
+|---|---|---|
+| `question` | 「@here Airecoの最新の汎用資料をお持ちの方がいらっしゃったら共有いただけると嬉しいです」 | RAGで検索し、社内ナレッジから該当資料を返答 |
+| `question` | 「メルカートのオプション機能一覧はどこで見れますか？」 | RAGで検索して回答 |
+| `share` | 「jQuery4系対応関連のドキュメントをざっと作成しました（初稿）」 | お礼・acknowledgmentのみ返す（RAGは動かない） |
+| `share` | 「本日の定例MTGの議事録を共有します」 | お礼・acknowledgmentのみ返す |
+
+`@here` や `@channel` のような全体向け呼びかけを含む投稿も、情報を求めている内容であれば `question` として扱われRAGが動作する。
 
 ## 設計思想
 
