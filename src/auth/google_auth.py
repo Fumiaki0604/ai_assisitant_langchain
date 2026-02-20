@@ -14,7 +14,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Google Drive API のスコープ
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/drive.file',
+]
 
 
 class GoogleDriveAuth:

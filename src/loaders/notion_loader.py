@@ -212,11 +212,12 @@ class NotionLoader:
 
         return "Untitled"
 
-    def load_pages(self, query: str = None, limit: int = 50) -> list:
+    def load_pages(self, query: str = None, limit: int = None) -> list:
         """
         Notionページを読み込んでドキュメント形式に変換
         """
-        pages = self.search_pages(query)[:limit]
+        all_pages = self.search_pages(query)
+        pages = all_pages[:limit] if limit else all_pages
         documents = []
 
         for page in pages:
