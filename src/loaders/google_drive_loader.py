@@ -110,15 +110,12 @@ class GoogleDriveLoader:
     def download_file_content(self, file_id: str, mime_type: str) -> str:
         """
         Google Driveからファイルの内容をダウンロード
-
-        Args:
-            file_id: ファイルID
-            mime_type: ファイルのMIMEタイプ
-
-        Returns:
-            str: ファイルの内容（テキスト）
         """
         try:
+            # PDFはGoogle Drive OCR経由でテキスト抽出
+            if mime_type == 'application/pdf':
+                return self._extract_pdf_text_via_ocr(file_id)
+
             # Google Docsの場合はエクスポート
             if mime_type == 'application/vnd.google-apps.document':
                 request = self.service.files().export_media(
@@ -133,37 +130,57 @@ class GoogleDriveLoader:
 
             file_buffer = io.BytesIO()
             downloader = MediaIoBaseDownload(file_buffer, request)
-
             done = False
             while not done:
-                status, done = downloader.next_chunk()
-
+                _, done = downloader.next_chunk()
             file_buffer.seek(0)
 
-            # MIMEタイプに応じて内容を抽出
-            if mime_type == 'application/pdf':
-                return self._extract_pdf_text(file_buffer)
-            elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+            if mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
                 return self._extract_docx_text(file_buffer)
             else:
-                # テキストファイル or Google Docs（プレーンテキストとしてエクスポート済み）
                 return file_buffer.read().decode('utf-8')
 
         except Exception as e:
             logger.error(f"Failed to download file {file_id}: {e}")
             return ""
 
-    def _extract_pdf_text(self, file_buffer: io.BytesIO) -> str:
-        """PDFからテキストを抽出"""
+    def _extract_pdf_text_via_ocr(self, file_id: str) -> str:
+        """Google Drive OCRを使ってPDFからテキストを抽出"""
+        doc_id = None
         try:
-            pdf_reader = PdfReader(file_buffer)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
+            # PDFをGoogle Docsとしてコピー（OCR変換）
+            copy_response = self.service.files().copy(
+                fileId=file_id,
+                body={'mimeType': 'application/vnd.google-apps.document'},
+                supportsAllDrives=True
+            ).execute()
+            doc_id = copy_response['id']
+
+            # Google DocsをプレーンテキストとしてExport
+            request = self.service.files().export_media(
+                fileId=doc_id,
+                mimeType='text/plain'
+            )
+            file_buffer = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_buffer, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            file_buffer.seek(0)
+            text = file_buffer.read().decode('utf-8')
+            logger.info(f"OCR extraction succeeded: {len(text)} chars")
             return text
+
         except Exception as e:
-            logger.error(f"Failed to extract PDF text: {e}")
+            logger.error(f"OCR extraction failed for {file_id}: {e}")
             return ""
+        finally:
+            # 一時的に作成したGoogle Docsを削除
+            if doc_id:
+                try:
+                    self.service.files().delete(fileId=doc_id).execute()
+                except Exception:
+                    pass
 
     def _extract_docx_text(self, file_buffer: io.BytesIO) -> str:
         """Docxからテキストを抽出"""
@@ -241,6 +258,14 @@ class GoogleDriveLoader:
         logger.info(f"Total: Loaded {len(documents)} documents from Google Drive")
         return documents
 
+    def _is_garbled(self, text: str) -> bool:
+        """文字化けテキストかどうかを判定（印字可能な文字の比率で判断）"""
+        if not text:
+            return True
+        printable = sum(1 for c in text if c.isprintable() or c in '\n\t ')
+        ratio = printable / len(text)
+        return ratio < 0.7
+
     def _clean_text(self, text: str) -> str:
         """不正なUnicode文字を除去"""
         import re
@@ -273,9 +298,15 @@ class GoogleDriveLoader:
             for doc in documents:
                 # テキストをクリーンアップ
                 cleaned_content = self._clean_text(doc.page_content)
+                if self._is_garbled(cleaned_content):
+                    logger.warning(f"Skipping garbled document: {doc.metadata.get('file_name', 'unknown')}")
+                    continue
                 chunks = self.text_splitter.split_text(cleaned_content)
                 for i, chunk in enumerate(chunks):
-                    all_texts.append(self._clean_text(chunk))
+                    cleaned_chunk = self._clean_text(chunk)
+                    if self._is_garbled(cleaned_chunk):
+                        continue
+                    all_texts.append(cleaned_chunk)
                     metadata = doc.metadata.copy()
                     metadata["chunk_id"] = i
                     all_metadatas.append(metadata)
