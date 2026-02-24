@@ -179,8 +179,9 @@ class GoogleDriveLoader:
             if doc_id:
                 try:
                     self.service.files().delete(fileId=doc_id).execute()
-                except Exception:
-                    pass
+                    logger.info(f"Deleted temp OCR doc: {doc_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp OCR doc {doc_id}: {e}. Please delete it manually from Google Drive.")
 
     def _extract_docx_text(self, file_buffer: io.BytesIO) -> str:
         """Docxからテキストを抽出"""
