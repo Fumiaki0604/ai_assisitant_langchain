@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 def sync_slack_history():
-    """Slack履歴を同期"""
-    channels = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
+    """Slack履歴を同期（自動返信チャンネル＋ナレッジ専用チャンネル）"""
+    auto_reply = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
+    knowledge = [ch.strip() for ch in getattr(settings, 'slack_knowledge_channels', '').split(',') if ch.strip()]
+    channels = list(dict.fromkeys(auto_reply + knowledge))  # 重複排除
+
     if not channels:
         logger.info("No Slack channels configured")
         return 0
