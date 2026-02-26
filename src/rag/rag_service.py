@@ -146,7 +146,7 @@ class RAGService:
             source_info = {
                 "title": title,
                 "source": doc.metadata.get('source', '不明'),
-                "link": doc.metadata.get('web_view_link', ''),
+                "link": doc.metadata.get('web_view_link') or doc.metadata.get('permalink', ''),
                 "content": doc.page_content[:200]
             }
 

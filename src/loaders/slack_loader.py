@@ -40,6 +40,15 @@ class SlackHistoryLoader:
             logger.error(f"Failed to get channel name: {e}")
             return channel_id
 
+    def get_permalink(self, channel_id: str, message_ts: str) -> str:
+        """メッセージのパーマリンクを取得"""
+        try:
+            result = self.client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
+            return result["permalink"]
+        except SlackApiError as e:
+            logger.warning(f"Failed to get permalink for {channel_id}/{message_ts}: {e}")
+            return ""
+
     def get_user_name(self, user_id: str) -> str:
         """ユーザー名を取得"""
         try:
@@ -113,6 +122,8 @@ class SlackHistoryLoader:
 
         content = "\n\n".join(content_parts)
 
+        permalink = self.get_permalink(channel_id, timestamp)
+
         return {
             "content": content,
             "metadata": {
@@ -121,6 +132,7 @@ class SlackHistoryLoader:
                 "channel_name": channel_name,
                 "thread_ts": timestamp,
                 "date": date_str,
+                "permalink": permalink,
                 "title": f"Slack: {question_text[:50]}..." if len(question_text) > 50 else f"Slack: {question_text}"
             }
         }
@@ -160,6 +172,7 @@ class SlackHistoryLoader:
                     except:
                         date_str = "Unknown"
 
+                    permalink = self.get_permalink(channel_id, timestamp)
                     documents.append({
                         "content": f"投稿 ({user}): {text}",
                         "metadata": {
@@ -168,6 +181,7 @@ class SlackHistoryLoader:
                             "channel_name": channel_name,
                             "thread_ts": timestamp,
                             "date": date_str,
+                            "permalink": permalink,
                             "title": f"Slack: {text[:50]}..." if len(text) > 50 else f"Slack: {text}"
                         }
                     })
