@@ -178,10 +178,10 @@ class GoogleDriveLoader:
             # 一時的に作成したGoogle Docsを削除
             if doc_id:
                 try:
-                    self.service.files().delete(fileId=doc_id).execute()
-                    logger.info(f"Deleted temp OCR doc: {doc_id}")
+                    self.service.files().update(fileId=doc_id, body={'trashed': True}).execute()
+                    logger.info(f"Trashed temp OCR doc: {doc_id}")
                 except Exception as e:
-                    logger.warning(f"Failed to delete temp OCR doc {doc_id}: {e}. Please delete it manually from Google Drive.")
+                    logger.warning(f"Failed to trash temp OCR doc {doc_id}: {e}. Please delete it manually from Google Drive.")
 
     def _extract_docx_text(self, file_buffer: io.BytesIO) -> str:
         """Docxからテキストを抽出"""
