@@ -112,9 +112,26 @@ class GoogleDriveLoader:
         Google Driveからファイルの内容をダウンロード
         """
         try:
-            # PDFはGoogle Drive OCR経由でテキスト抽出
+            # PDFはGoogle Drive OCR経由でテキスト抽出、失敗時はpypdfでフォールバック
             if mime_type == 'application/pdf':
-                return self._extract_pdf_text_via_ocr(file_id)
+                text = self._extract_pdf_text_via_ocr(file_id)
+                if text is not None:
+                    return text
+                # OCR失敗 → pypdfフォールバック
+                logger.info(f"Falling back to pypdf for {file_id}")
+                try:
+                    request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                    buf = io.BytesIO()
+                    downloader = MediaIoBaseDownload(buf, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                    buf.seek(0)
+                    reader = PdfReader(buf)
+                    return "\n".join(page.extract_text() or "" for page in reader.pages)
+                except Exception as e:
+                    logger.error(f"pypdf fallback also failed for {file_id}: {e}")
+                    return ""
 
             # Google Docsの場合はエクスポート
             if mime_type == 'application/vnd.google-apps.document':
@@ -173,7 +190,7 @@ class GoogleDriveLoader:
 
         except Exception as e:
             logger.error(f"OCR extraction failed for {file_id}: {e}")
-            return ""
+            return None  # Noneでフォールバックを示す
         finally:
             # 一時的に作成したGoogle Docsを削除
             if doc_id:
