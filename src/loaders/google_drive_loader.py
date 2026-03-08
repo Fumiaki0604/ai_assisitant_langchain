@@ -166,9 +166,10 @@ class GoogleDriveLoader:
         doc_id = None
         try:
             # PDFをGoogle Docsとしてコピー（OCR変換）
+            # parentsにrootを指定してMy Driveにコピー（共有ドライブだとdrive.fileスコープで削除できないため）
             copy_response = self.service.files().copy(
                 fileId=file_id,
-                body={'mimeType': 'application/vnd.google-apps.document'},
+                body={'mimeType': 'application/vnd.google-apps.document', 'parents': ['root']},
                 supportsAllDrives=True
             ).execute()
             doc_id = copy_response['id']
