@@ -58,6 +58,24 @@ RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。参�
 
 回答:"""
 
+# 資料探しリクエスト用プロンプト（「〜持ってる方いますか」系）
+DOCUMENT_REQUEST_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。これは「社内で特定の資料・ファイルを持っている人を探す」投稿です。
+
+## 社内ナレッジ検索結果
+{context}
+
+## 質問
+{question}
+
+## 回答ルール
+1. 社内ナレッジ（Drive・Slack）の検索結果のみを報告する
+2. 見つかった場合：ファイル名やリンクを簡潔に提示する
+3. 見つからなかった場合：「社内ナレッジには該当する資料は確認できませんでした。」の1文のみ
+4. **絶対にやらないこと**：サービスの説明、外部サイトへの問い合わせ推奨、公式サイトURL、一般的な代替案の提示
+5. 推測・仮説・補足説明は不要。あるかないかだけ答える
+
+回答:"""
+
 # Web検索フォールバック用プロンプト（社内ナレッジが不十分な場合）
 WEB_FALLBACK_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。社内ナレッジに十分な情報がなかったため、一般知識とWeb検索結果を活用して回答します。
 
@@ -280,6 +298,27 @@ class RAGService:
             logger.warning(f"Message intent classification failed: {e}")
             return {"intent": "question"}
 
+    def _is_document_request(self, question: str) -> bool:
+        """「資料・ファイルを持っている人を探す」質問かどうかをLLMで判定"""
+        try:
+            prompt = """以下のメッセージが「社内で資料・ファイル・テンプレート・提案書などを持っている人を探している」投稿かどうかを判定してください。
+
+メッセージ: {question}
+
+判定基準:
+- 「〜資料をお持ちの方」「〜持っている方いますか」「〜テンプレートありますか」「〜スライド・提案書ありますか」→ yes
+- 知識・方法・事例・仕様を聞く質問 → no
+
+回答は「yes」か「no」の1単語のみ:"""
+
+            result = self.llm.invoke(prompt.format(question=question[:500]))
+            if hasattr(result, 'content'):
+                result = result.content
+            return "yes" in result.strip().lower()
+        except Exception as e:
+            logger.warning(f"Document request classification failed: {e}")
+            return False
+
     def _classify_question_type(self, question: str) -> str:
         """質問が内部製品に関するものか外部サービスに関するものかをLLMで判定"""
         try:
@@ -443,30 +482,42 @@ class RAGService:
             # ソースを分類
             sources_by_type = self._classify_sources(source_docs)
 
-            # Web検索の判定
+            # 資料探しリクエストの判定（Web検索スキップ・専用プロンプト使用）
+            is_doc_request = self._is_document_request(question)
+            if is_doc_request:
+                logger.info("Document request detected -> skip web search, use DOCUMENT_REQUEST prompt")
+
+            # Web検索の判定（資料探しリクエストはスキップ）
             web_results = []
             should_web_search = False
 
-            # 内部ソースがない、または関連度が低い場合
-            has_internal_sources = sources_by_type['drive'] or sources_by_type['slack']
-            if not has_internal_sources:
-                # 内部ソースが完全にゼロ → 質問タイプに関係なくWeb検索
-                should_web_search = True
-                logger.info("No internal sources found -> web search")
-            elif top_score < 0.5:
-                # 関連度が低い場合もWeb検索で補完
-                should_web_search = True
-                logger.info(f"Low relevance ({top_score:.2f}) -> web search")
+            if not is_doc_request:
+                # 内部ソースがない、または関連度が低い場合
+                has_internal_sources = sources_by_type['drive'] or sources_by_type['slack']
+                if not has_internal_sources:
+                    should_web_search = True
+                    logger.info("No internal sources found -> web search")
+                elif top_score < 0.5:
+                    should_web_search = True
+                    logger.info(f"Low relevance ({top_score:.2f}) -> web search")
 
             if should_web_search:
                 web_results = self.web_search(question)
                 sources_by_type['web'] = web_results
 
             # プロンプト選択とコンテキスト構築
-            # 内部ソースが不十分なら、Web検索結果の有無に関わらず柔軟プロンプトを使う
             use_web_fallback = should_web_search
 
-            if use_web_fallback:
+            if is_doc_request:
+                # 資料探しリクエスト: 社内ナレッジ結果のみで専用プロンプト
+                context_parts = [doc.page_content for doc in source_docs]
+                context = "\n\n".join(context_parts) if context_parts else "該当する社内情報なし"
+                doc_request_prompt = PromptTemplate(
+                    template=DOCUMENT_REQUEST_PROMPT_TEMPLATE,
+                    input_variables=["context", "question"]
+                )
+                formatted_prompt = doc_request_prompt.format(context=context, question=question)
+            elif use_web_fallback:
                 # Web検索フォールバック: コンテンツ込みのコンテキストを構築
                 web_context_parts = []
                 for r in web_results:
