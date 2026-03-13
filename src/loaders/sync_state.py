@@ -80,20 +80,34 @@ def _save_to_local(state: dict):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def delete_vectors(vector_ids: list, index_name: str):
-    """Pineconeから指定IDのベクターを削除"""
+def delete_vectors(vector_ids: list, index_name: str) -> list:
+    """
+    Pineconeから指定IDのベクターを削除。
+    Returns: 削除に失敗したIDのリスト（空 = 全件成功）
+    """
     if not vector_ids:
-        return
+        return []
+    failed = []
     try:
         from pinecone import Pinecone
         from config.settings import settings
         pc = Pinecone(api_key=settings.pinecone_api_key)
         index = pc.Index(index_name)
         for i in range(0, len(vector_ids), 100):
-            index.delete(ids=vector_ids[i:i + 100])
-        logger.info(f"Deleted {len(vector_ids)} vectors from Pinecone")
+            batch = vector_ids[i:i + 100]
+            try:
+                index.delete(ids=batch)
+            except Exception as e:
+                logger.error(f"Failed to delete batch ({len(batch)} IDs): {e}")
+                failed.extend(batch)
+        if not failed:
+            logger.info(f"Deleted {len(vector_ids)} vectors from Pinecone")
+        else:
+            logger.warning(f"Deleted {len(vector_ids) - len(failed)}/{len(vector_ids)} vectors. {len(failed)} failed.")
     except Exception as e:
-        logger.error(f"Failed to delete vectors: {e}")
+        logger.error(f"Failed to initialize Pinecone for deletion: {e}")
+        failed = list(vector_ids)
+    return failed
 
 
 def save_docs_with_ids(documents: list, id_prefixes: list, text_splitter, index_name: str) -> list:

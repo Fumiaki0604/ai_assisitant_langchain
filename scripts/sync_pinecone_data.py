@@ -29,6 +29,31 @@ def _safe_id(s: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_-]', '_', s)
 
 
+def _flush_pending_deletes(state: dict):
+    """前回削除に失敗したベクターIDを再試行"""
+    pending = state.get("pending_delete_ids", [])
+    if not pending:
+        return
+    logger.info(f"Retrying deletion of {len(pending)} pending vector IDs...")
+    failed = delete_vectors(pending, settings.pinecone_index_name)
+    if failed:
+        state["pending_delete_ids"] = failed
+        logger.warning(f"{len(failed)} IDs still pending deletion, will retry next run")
+    else:
+        state.pop("pending_delete_ids", None)
+        logger.info("All pending deletions cleared")
+
+
+def _queue_delete(state: dict, old_ids: list):
+    """削除対象IDを処理し、失敗分をpending_delete_idsに退避"""
+    if not old_ids:
+        return
+    failed = delete_vectors(old_ids, settings.pinecone_index_name)
+    if failed:
+        state.setdefault("pending_delete_ids", []).extend(failed)
+        logger.warning(f"{len(failed)} IDs queued for retry deletion")
+
+
 def sync_slack_history(state: dict) -> int:
     """Slack履歴を差分同期（reply_count変化時のみ更新）"""
     auto_reply = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
@@ -118,7 +143,7 @@ def sync_slack_history(state: dict) -> int:
                     keys_to_update.append((state_key, {}))
 
             if old_ids_to_delete:
-                delete_vectors(old_ids_to_delete, settings.pinecone_index_name)
+                _queue_delete(state, old_ids_to_delete)
 
             if new_docs:
                 vector_ids_map = save_docs_with_ids(
@@ -184,7 +209,7 @@ def sync_google_drive(state: dict) -> int:
             keys_to_update.append((file_id, modified_time))
 
         if old_ids_to_delete:
-            delete_vectors(old_ids_to_delete, settings.pinecone_index_name)
+            _queue_delete(state, old_ids_to_delete)
 
         if new_docs:
             vector_ids_map = save_docs_with_ids(
@@ -270,7 +295,7 @@ def sync_notion(state: dict) -> int:
             keys_to_update.append((page_id, last_edited))
 
         if old_ids_to_delete:
-            delete_vectors(old_ids_to_delete, settings.pinecone_index_name)
+            _queue_delete(state, old_ids_to_delete)
 
         if new_docs:
             vector_ids_map = save_docs_with_ids(
@@ -296,6 +321,8 @@ def sync_notion(state: dict) -> int:
 def main():
     logger.info("Starting incremental Pinecone sync...")
     state = load_state()
+
+    _flush_pending_deletes(state)
 
     slack_count = sync_slack_history(state)
     drive_count = sync_google_drive(state)
