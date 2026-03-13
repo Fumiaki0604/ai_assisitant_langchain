@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Cohere (Optional - for Reranking)
     cohere_api_key: Optional[str] = None
 
+    # S3 (差分インデックス状態管理)
+    s3_state_bucket: Optional[str] = None
+
     # Application
     log_level: str = "INFO"
     feedback_log_file: str = "logs/feedback.json"

@@ -1,6 +1,7 @@
 """
 差分インデックス用の状態管理
-data/sync_state.json にインデックス済みドキュメントの情報を保存
+S3_STATE_BUCKET 環境変数が設定されている場合はS3に保存（ECS用）
+未設定の場合はローカルファイル（ローカル開発用）
 """
 import json
 import os
@@ -9,22 +10,73 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = "data/sync_state.json"
+STATE_KEY = "sync_state.json"
+LOCAL_STATE_FILE = "data/sync_state.json"
+
+
+def _get_s3_bucket() -> str | None:
+    return os.environ.get("S3_STATE_BUCKET")
 
 
 def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
+    bucket = _get_s3_bucket()
+    if bucket:
+        return _load_from_s3(bucket)
+    return _load_from_local()
+
+
+def save_state(state: dict):
+    bucket = _get_s3_bucket()
+    if bucket:
+        _save_to_s3(bucket, state)
+    else:
+        _save_to_local(state)
+
+
+def _load_from_s3(bucket: str) -> dict:
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+        s3 = boto3.client("s3")
+        response = s3.get_object(Bucket=bucket, Key=STATE_KEY)
+        return json.loads(response["Body"].read().decode("utf-8"))
+    except Exception as e:
+        # NoSuchKey の場合は初回起動として扱う
+        if "NoSuchKey" in str(e):
+            logger.info("No existing sync state in S3, starting fresh.")
+        else:
+            logger.warning(f"Failed to load state from S3: {e}. Starting fresh.")
+        return {"slack": {}, "google_drive": {}, "notion": {}}
+
+
+def _save_to_s3(bucket: str, state: dict):
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+        s3.put_object(
+            Bucket=bucket,
+            Key=STATE_KEY,
+            Body=json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"),
+            ContentType="application/json"
+        )
+        logger.info(f"Sync state saved to s3://{bucket}/{STATE_KEY}")
+    except Exception as e:
+        logger.error(f"Failed to save state to S3: {e}")
+
+
+def _load_from_local() -> dict:
+    if os.path.exists(LOCAL_STATE_FILE):
         try:
-            with open(STATE_FILE, encoding="utf-8") as f:
+            with open(LOCAL_STATE_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             logger.warning(f"Failed to load sync state: {e}. Starting fresh.")
     return {"slack": {}, "google_drive": {}, "notion": {}}
 
 
-def save_state(state: dict):
-    Path(STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+def _save_to_local(state: dict):
+    Path(LOCAL_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCAL_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
@@ -37,7 +89,6 @@ def delete_vectors(vector_ids: list, index_name: str):
         from config.settings import settings
         pc = Pinecone(api_key=settings.pinecone_api_key)
         index = pc.Index(index_name)
-        # Pineconeはバッチ削除に上限があるため100件ずつ
         for i in range(0, len(vector_ids), 100):
             index.delete(ids=vector_ids[i:i + 100])
         logger.info(f"Deleted {len(vector_ids)} vectors from Pinecone")
@@ -63,7 +114,6 @@ def save_docs_with_ids(documents: list, id_prefixes: list, text_splitter, index_
     doc_id_lists = [[] for _ in documents]
 
     for doc_i, (doc, prefix) in enumerate(zip(documents, id_prefixes)):
-        # LangChain Document と dict の両形式に対応
         if hasattr(doc, 'page_content'):
             content = doc.page_content
             metadata = doc.metadata.copy()

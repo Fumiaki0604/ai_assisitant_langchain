@@ -150,6 +150,14 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AppName}/*
 
+  # S3 Bucket for incremental sync state
+  SyncStateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AppName}-sync-state-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+
   # IAM Role for ECS Task
   ECSTaskRole:
     Type: AWS::IAM::Role
@@ -172,6 +180,15 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource: '*'
+        - PolicyName: S3SyncStateAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${AppName}-sync-state-${AWS::AccountId}/sync_state.json
 
   # ECS Task Definition
   TaskDefinition:
@@ -204,8 +221,12 @@ Resources:
               Value: slack-ai-assistant
             - Name: SLACK_AUTO_REPLY_CHANNELS
               Value: CME3BV4PN,C061Q3XQMPA
+            - Name: SLACK_KNOWLEDGE_CHANNELS
+              Value: C0551545GU8,CH4B7A2FJ
             - Name: GOOGLE_DRIVE_FOLDER_ID
               Value: 0AC0oLVMcTPpcUk9PVA
+            - Name: S3_STATE_BUCKET
+              Value: !Sub ${AppName}-sync-state-${AWS::AccountId}
           Secrets:
             - Name: PINECONE_API_KEY
               ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/pinecone-api-key-rW3Hb8
