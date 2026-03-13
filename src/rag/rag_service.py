@@ -58,8 +58,9 @@ RAG_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。参�
 
 回答:"""
 
-# 資料探しリクエスト用プロンプト（「〜持ってる方いますか」系）
-DOCUMENT_REQUEST_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。これは「社内で特定の資料・ファイルを持っている人を探す」投稿です。
+# 社内探索リクエスト用プロンプト（実績・担当者・資料探し）
+# EXPERIENCE（実績探し）/ OWNER（担当者探し）/ DOCUMENT（資料探し）共通
+INTERNAL_SEARCH_PROMPT_TEMPLATE = """あなたは社内のAIアシスタントです。これは社内の実績・担当者・資料を探す投稿です。
 
 ## 社内ナレッジ検索結果
 {context}
@@ -69,10 +70,10 @@ DOCUMENT_REQUEST_PROMPT_TEMPLATE = """あなたは社内のAIアシスタント�
 
 ## 回答ルール
 1. 社内ナレッジ（Drive・Slack）の検索結果のみを報告する
-2. 見つかった場合：ファイル名やリンクを簡潔に提示する
-3. 見つからなかった場合：「社内ナレッジには該当する資料は確認できませんでした。」の1文のみ
-4. **絶対にやらないこと**：サービスの説明、外部サイトへの問い合わせ推奨、公式サイトURL、一般的な代替案の提示
-5. 推測・仮説・補足説明は不要。あるかないかだけ答える
+2. 見つかった場合：名前・ファイル名・事例名・リンクを簡潔に提示する
+3. 見つからなかった場合：「社内ナレッジには該当する情報は確認できませんでした。」の1文のみ
+4. **絶対にやらないこと**：説明・分析・アドバイス・提案・外部URL・一般論・トレンド解説
+5. 推測・補足説明は不要。あるかないかだけ答える
 
 回答:"""
 
@@ -298,26 +299,40 @@ class RAGService:
             logger.warning(f"Message intent classification failed: {e}")
             return {"intent": "question"}
 
-    def _is_document_request(self, question: str) -> bool:
-        """「資料・ファイルを持っている人を探す」質問かどうかをLLMで判定"""
+    def _classify_slack_request_type(self, question: str) -> str:
+        """
+        Slackメッセージのリクエストタイプを判定。
+
+        Returns:
+            "knowledge"  - 知識・方法・仕様を問う質問（通常RAGフロー）
+            "experience" - 社内実績・事例・案件経験を探す質問
+            "document"   - 社内の資料・ファイルを持っている人を探す質問
+            "owner"      - 特定案件・顧客の担当者を探す質問
+        """
         try:
-            prompt = """以下のメッセージが「社内で資料・ファイル・テンプレート・提案書などを持っている人を探している」投稿かどうかを判定してください。
+            prompt = """以下のSlackメッセージのリクエストタイプを判定してください。
 
 メッセージ: {question}
 
-判定基準:
-- 「〜資料をお持ちの方」「〜持っている方いますか」「〜テンプレートありますか」「〜スライド・提案書ありますか」→ yes
-- 知識・方法・事例・仕様を聞く質問 → no
+タイプの定義:
+- knowledge: 知識・方法・仕様・使い方を問う質問。例「GA4のイベント設定は？」「〜の方法を教えて」
+- experience: 社内の実績・事例・案件経験を探す質問。例「Shopify導入事例ある？」「採用サイト担当したことある方？」「〜の事例を集めてます」
+- document: 社内の資料・ファイル・テンプレートを持っている人を探す質問。例「〜資料をお持ちの方」「〜テンプレートありますか」
+- owner: 特定の顧客・案件・業務の担当者を探す質問。例「PDC担当の方いますか？」「〜の担当は誰ですか？」
 
-回答は「yes」か「no」の1単語のみ:"""
+回答は「knowledge」「experience」「document」「owner」のいずれか1単語のみ:"""
 
             result = self.llm.invoke(prompt.format(question=question[:500]))
             if hasattr(result, 'content'):
                 result = result.content
-            return "yes" in result.strip().lower()
+            result_lower = result.strip().lower()
+            for t in ("experience", "document", "owner"):
+                if t in result_lower:
+                    return t
+            return "knowledge"
         except Exception as e:
-            logger.warning(f"Document request classification failed: {e}")
-            return False
+            logger.warning(f"Slack request type classification failed: {e}")
+            return "knowledge"
 
     def _classify_question_type(self, question: str) -> str:
         """質問が内部製品に関するものか外部サービスに関するものかをLLMで判定"""
@@ -482,16 +497,17 @@ class RAGService:
             # ソースを分類
             sources_by_type = self._classify_sources(source_docs)
 
-            # 資料探しリクエストの判定（Web検索スキップ・専用プロンプト使用）
-            is_doc_request = self._is_document_request(question)
-            if is_doc_request:
-                logger.info("Document request detected -> skip web search, use DOCUMENT_REQUEST prompt")
+            # リクエストタイプ判定（experience/document/ownerは社内検索のみ・説明禁止）
+            request_type = self._classify_slack_request_type(question)
+            is_internal_only = request_type in ("experience", "document", "owner")
+            if is_internal_only:
+                logger.info(f"Request type '{request_type}' detected -> skip web search, use INTERNAL_SEARCH prompt")
 
-            # Web検索の判定（資料探しリクエストはスキップ）
+            # Web検索の判定（社内探索リクエストはスキップ）
             web_results = []
             should_web_search = False
 
-            if not is_doc_request:
+            if not is_internal_only:
                 # 内部ソースがない、または関連度が低い場合
                 has_internal_sources = sources_by_type['drive'] or sources_by_type['slack']
                 if not has_internal_sources:
@@ -508,15 +524,15 @@ class RAGService:
             # プロンプト選択とコンテキスト構築
             use_web_fallback = should_web_search
 
-            if is_doc_request:
-                # 資料探しリクエスト: 社内ナレッジ結果のみで専用プロンプト
+            if is_internal_only:
+                # 社内探索リクエスト（実績/担当者/資料）: 社内ナレッジ結果のみで専用プロンプト
                 context_parts = [doc.page_content for doc in source_docs]
                 context = "\n\n".join(context_parts) if context_parts else "該当する社内情報なし"
-                doc_request_prompt = PromptTemplate(
-                    template=DOCUMENT_REQUEST_PROMPT_TEMPLATE,
+                internal_search_prompt = PromptTemplate(
+                    template=INTERNAL_SEARCH_PROMPT_TEMPLATE,
                     input_variables=["context", "question"]
                 )
-                formatted_prompt = doc_request_prompt.format(context=context, question=question)
+                formatted_prompt = internal_search_prompt.format(context=context, question=question)
             elif use_web_fallback:
                 # Web検索フォールバック: コンテンツ込みのコンテキストを構築
                 web_context_parts = []
