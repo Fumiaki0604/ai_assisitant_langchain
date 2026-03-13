@@ -20,19 +20,24 @@ Slack Message
 メッセージ意図分類（LLM）
   ├─ 共有・連絡 → 自然なリアクションを返して終了
   └─ 質問・相談 ↓
+Slackリクエストタイプ分類（LLM）
+  ├─ KNOWLEDGE  → 通常RAGフロー
+  ├─ EXPERIENCE → 社内実績探索（Web検索・説明禁止）
+  ├─ DOCUMENT   → 社内資料探索（Web検索・説明禁止）
+  ├─ OWNER      → 担当者探索（Web検索・説明禁止）
+  └─ OPINION    → 通常RAGフロー
 Pinecone検索（similarity_score_threshold=0.5）
   ↓
 Cohere Rerank（min_score=0.5）
   ↓
-内部ナレッジ十分？
+内部ナレッジ十分？（KNOWLEDGEのみ判定）
   ├─ Yes → RAGプロンプトで回答生成 → Grounding検証
   └─ No  → Web検索フォールバック（コンテンツ取得）
            → 3層構造プロンプトで回答生成
-             ① 一般論・業界の共通認識
-             ② 当社視点での見解・仮説
-             ③ 判断軸の整理
   ↓
 Slack Reply（参考情報 + 信頼度スコア + フィードバックボタン）
+  ↓
+自動採点（LLM / 5軸100点）→ S3 or ローカルに記録
 ```
 
 ## 機能
@@ -40,17 +45,20 @@ Slack Reply（参考情報 + 信頼度スコア + フィードバックボタン
 - **自動返信チャンネル**: 指定チャンネルの全メッセージに自動応答
 - **メンション応答**: `@bot` で任意のチャンネルから質問可能
 - **メッセージ意図分類**: 質問/共有を自動判定し、共有にはリアクションのみ返す
+- **5タイプリクエスト分類**: KNOWLEDGE / EXPERIENCE / DOCUMENT / OWNER / OPINION を自動判定
+- **社内探索モード**: EXPERIENCE/DOCUMENT/OWNER はWeb検索・説明を省略し「あるかないか」だけ返す
 - **2段階フィルタリング**: Pinecone類似度閾値 + Cohere Rerankで無関係ドキュメントを除外
 - **Web検索フォールバック**: 社内ナレッジ不足時にDuckDuckGoで検索しページ内容も取得
-- **質問タイプ分類**: 自社製品 vs 外部サービスの質問を判定しWeb検索の要否を決定
 - **回答のGrounding検証**: 回答が参考資料に基づいているかLLMで検証
 - **信頼度スコア**: 関連度 x 整合性で信頼度を表示
 - **フィードバック**: 👍/👎 ボタン・リアクションで回答品質を記録
+- **自動採点ログ**: 回答ごとに5軸100点ルーブリックでLLM採点しS3/ローカルに記録
 - **人間優先**: 人間が先に返信済みのスレッドはスキップ
 - **複数データソース**: Slack履歴 / Google Drive / Notion / PDF / Markdown
 - **NotionPDF自動取得**: NotionデータベースのURLプロパティに格納されたPDF（外部CDN含む）を自動ダウンロードしてRAGに取り込む
 - **Google Drive OCR**: PyPDF2では文字化けするスキャンPDF・画像PDFをGoogle Drive OCR（PDF→Google Doc変換）で正確にテキスト抽出
-- **週次自動sync**: ECS Scheduled TaskでSlack履歴・Google Drive・NotionをPineconeへ定期同期
+- **週次自動sync（差分更新）**: ECS Scheduled TaskでSlack履歴・Google Drive・NotionをPineconeへ増分同期（S3で状態管理）
+- **画像対応**: Slackに添付された画像をBedrockのマルチモーダルで解析して回答
 
 ## セットアップ
 
@@ -125,16 +133,21 @@ docker-compose up -d --build
 slack-ai-assistant/
 ├── src/
 │   ├── slack/bot.py           # メインエントリポイント（イベント処理）
-│   ├── rag/rag_service.py     # RAGサービス（検索・リランク・回答生成）
+│   ├── slack/image_handler.py # Slack添付画像の取得・リサイズ・base64変換
+│   ├── rag/rag_service.py     # RAGサービス（検索・リランク・回答生成・タイプ分類）
 │   ├── rag/embeddings.py      # Amazon Titan Embeddings V2
 │   ├── llm/bedrock.py         # Bedrock Claude 3.5 Sonnet
 │   ├── loaders/               # データローダー（Slack/ファイル/Notion/Google Drive）
+│   ├── loaders/sync_state.py  # 増分同期の状態管理（S3/ローカル）
 │   ├── feedback/              # フィードバック記録
-│   ├── evaluation/            # RAGAS評価フレームワーク
+│   ├── evaluation/evaluator.py # 5軸ルーブリック自動採点・ログ保存
 │   └── auth/                  # Google認証
 ├── config/settings.py         # Pydantic Settings（.envから自動読み込み）
 ├── deploy/cloudformation.yml  # AWS CloudFormationテンプレート
-├── scripts/                   # ユーティリティスクリプト
+├── scripts/
+│   ├── sync_pinecone_data.py  # 増分同期スクリプト（ECS Scheduled Task）
+│   ├── eval_report.py         # 採点ログ集計レポート（CLI呼び出し用）
+│   └── ...                    # その他ユーティリティ
 └── data/                      # ローカルデータ（gitignore対象）
 ```
 
@@ -214,6 +227,42 @@ NOTION_API_KEY=secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 - **共有には共感**: 質問でないメッセージには無理に回答せず、自然なリアクションを返す
 - **ノイズ除去**: 2段階フィルタリング（Pinecone閾値 + Cohere Rerank）で無関係ドキュメントを確実に弾く
 - **透明性**: 参考情報のソース・信頼度スコアを必ず表示し、根拠を明示する
+
+## 回答品質の自動採点ログ
+
+### 採点フレーム（100点 / 5軸 × 20点）
+
+| 軸 | 見ているポイント |
+|---|---|
+| ①質問タイプ理解 | KNOWLEDGE/EXPERIENCE/DOCUMENT/OWNER/OPINION を正しく認識しているか |
+| ②質問への直接回答 | 冒頭1文で「ある/ない/〜です」と直接答えているか |
+| ③不要情報の少なさ | 余分な説明・トレンド解説・外部URLがないか |
+| ④社内文脈理解 | Slackの社内会話トーンに合っているか |
+| ⑤次の行動の妥当性 | 適切な次アクションを示しているか（EXPERIENCE/OWNERでは提案不要） |
+
+回答のたびにLLMが自動採点し、S3（`eval_logs/{date}/*.json`）またはローカル（`logs/eval_log.jsonl`）に記録する。
+
+### 採点ログの確認
+
+```bash
+python scripts/eval_report.py          # 過去30日
+python scripts/eval_report.py --days 7 # 過去7日
+```
+
+出力例:
+```
+=== 評価レポート（過去30日間 / 12件） ===
+
+【軸別 平均スコア / 0点件数】
+  ①質問タイプ理解: 8.3/20  (0点: 4件 / 33%) ⚠️
+  ...
+
+【低スコア事例（3件 / 60点未満）】
+  [28点 / experience] 採用サイトの事例を集めてます...
+    → ①質問タイプ誤認（q1=0）
+```
+
+レポートを確認後、Claude Codeに改善指示を伝えることでプロンプトを修正できる。
 
 ## Google Drive OCRについての注意
 

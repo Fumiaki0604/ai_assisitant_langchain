@@ -14,6 +14,7 @@ from src.rag.rag_service import get_rag_service
 from src.feedback.feedback_logger import get_feedback_logger
 from src.loaders.slack_loader import SlackHistoryLoader
 from src.slack.image_handler import fetch_images_from_event
+from src.evaluation.evaluator import evaluate_and_log
 import logging
 import re
 
@@ -276,6 +277,15 @@ def handle_mention(event, say, client):
 
         logger.info(f"Response sent to {user}")
 
+        evaluate_and_log(
+            question=clean_text,
+            answer=result['answer'],
+            question_type=result.get('question_type', 'knowledge'),
+            channel=channel,
+            user=user,
+            thread_ts=thread_ts,
+        )
+
     except Exception as e:
         logger.error(f"Error handling mention: {e}", exc_info=True)
         say(
@@ -413,6 +423,15 @@ def handle_message_events(event, say, client):
         )
 
         logger.info(f"Auto-response sent")
+
+        evaluate_and_log(
+            question=text,
+            answer=result['answer'],
+            question_type=result.get('question_type', 'knowledge'),
+            channel=channel,
+            user=user,
+            thread_ts=thread_ts or ts,
+        )
 
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)

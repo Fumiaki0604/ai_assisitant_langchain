@@ -319,14 +319,15 @@ class RAGService:
 - experience: 社内の実績・事例・案件経験を探す質問。例「Shopify導入事例ある？」「採用サイト担当したことある方？」「〜の事例を集めてます」
 - document: 社内の資料・ファイル・テンプレートを持っている人を探す質問。例「〜資料をお持ちの方」「〜テンプレートありますか」
 - owner: 特定の顧客・案件・業務の担当者を探す質問。例「PDC担当の方いますか？」「〜の担当は誰ですか？」
+- opinion: 意見・感想・評価を求める質問。例「これどう思う？」「〜についてどう感じますか」
 
-回答は「knowledge」「experience」「document」「owner」のいずれか1単語のみ:"""
+回答は「knowledge」「experience」「document」「owner」「opinion」のいずれか1単語のみ:"""
 
             result = self.llm.invoke(prompt.format(question=question[:500]))
             if hasattr(result, 'content'):
                 result = result.content
             result_lower = result.strip().lower()
-            for t in ("experience", "document", "owner"):
+            for t in ("experience", "document", "owner", "opinion"):
                 if t in result_lower:
                     return t
             return "knowledge"
@@ -591,7 +592,8 @@ class RAGService:
                 "is_unable_to_answer": is_unable,
                 "confidence_score": confidence_score,
                 "relevance_score": top_score,
-                "grounding_warning": grounding_result.get("warning")
+                "grounding_warning": grounding_result.get("warning"),
+                "question_type": request_type,
             }
 
         except Exception as e:
