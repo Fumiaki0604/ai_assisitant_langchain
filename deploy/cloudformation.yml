@@ -188,7 +188,9 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub arn:aws:s3:::${AppName}-sync-state-${AWS::AccountId}/sync_state.json
+                Resource:
+                  - !Sub arn:aws:s3:::${AppName}-sync-state-${AWS::AccountId}/sync_state.json
+                  - !Sub arn:aws:s3:::${AppName}-sync-state-${AWS::AccountId}/eval_logs/*
 
   # ECS Task Definition
   TaskDefinition:
