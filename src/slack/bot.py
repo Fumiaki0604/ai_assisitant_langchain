@@ -54,7 +54,7 @@ def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
 
     # ①ナレッジ(GoogleDrive)
     drive_sources = sources_by_type.get('drive', [])
-    if drive_sources:
+    if drive_sources and not is_unable:
         count = len(drive_sources)
         section = f"*①ナレッジ(GoogleDrive)から類似事例を検索*\n{count}件見つかりました。"
         for src in drive_sources[:3]:
@@ -68,7 +68,7 @@ def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
 
     # ②Slackの過去事例
     slack_sources = sources_by_type.get('slack', [])
-    if slack_sources:
+    if slack_sources and not is_unable:
         count = len(slack_sources)
         section = f"*②Slackの過去事例*\n{count}件見つかりました。"
         for src in slack_sources[:3]:
