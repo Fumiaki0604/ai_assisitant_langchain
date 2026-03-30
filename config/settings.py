@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # S3 (差分インデックス状態管理)
     s3_state_bucket: Optional[str] = None
 
+    # Pinecone Hybrid Search
+    pinecone_hybrid_alpha: float = 0.7  # 0=sparse only, 1=dense only
+
     # Application
     log_level: str = "INFO"
     feedback_log_file: str = "logs/feedback.json"

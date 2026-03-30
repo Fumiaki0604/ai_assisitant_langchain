@@ -10,7 +10,6 @@ from typing import List
 # プロジェクトルートをPythonパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from langchain_pinecone import PineconeVectorStore
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -120,12 +119,23 @@ class RAGService:
         # 埋め込みモデルを取得
         self.embeddings = get_embeddings()
 
-        # Pineconeベクトルストアに接続
+        # BM25エンコーダー（Hybrid Search用）
+        from pinecone_text.sparse import BM25Encoder
+        try:
+            bm25_local = "/app/data/bm25_params.json"
+            import os as _os
+            if _os.path.exists(bm25_local):
+                self.bm25 = BM25Encoder()
+                self.bm25.load(bm25_local)
+                logger.info("BM25Encoder loaded from local file")
+            else:
+                self.bm25 = BM25Encoder().default()
+                logger.info("BM25Encoder initialized from remote (default)")
+        except Exception as e:
+            logger.error(f"BM25Encoder init failed: {e}", exc_info=True)
+            raise
+
         logger.info(f"Connecting to Pinecone index: {settings.pinecone_index_name}")
-        self.vectorstore = PineconeVectorStore(
-            index_name=settings.pinecone_index_name,
-            embedding=self.embeddings
-        )
 
         # LLMを取得
         self.llm = get_bedrock_llm()
@@ -138,12 +148,6 @@ class RAGService:
         self.web_fallback_prompt = PromptTemplate(
             template=WEB_FALLBACK_PROMPT_TEMPLATE,
             input_variables=["web_context", "internal_context", "question"]
-        )
-
-        # Retrieverを作成（類似度スコア閾値でフィルタリング）
-        self.retriever = self.vectorstore.as_retriever(
-            search_type="similarity_score_threshold",
-            search_kwargs={"k": 10, "score_threshold": 0.5}
         )
 
         # Cohere Rerankクライアント
@@ -187,6 +191,37 @@ class RAGService:
             "drive": drive_sources,
             "other": other_sources
         }
+
+    def _hybrid_search(self, question: str, top_k: int = 10) -> List[Document]:
+        """Hybrid Search（dense Titan + sparse BM25）でPineconeを検索"""
+        from pinecone import Pinecone
+        alpha = settings.pinecone_hybrid_alpha
+
+        dense = self.embeddings.embed_query(question)
+        sparse = self.bm25.encode_queries(question)
+
+        scaled_dense = [v * alpha for v in dense]
+        scaled_sparse = {
+            "indices": sparse["indices"],
+            "values": [v * (1 - alpha) for v in sparse["values"]],
+        }
+
+        pc = Pinecone(api_key=settings.pinecone_api_key)
+        index = pc.Index(settings.pinecone_index_name)
+        results = index.query(
+            vector=scaled_dense,
+            sparse_vector=scaled_sparse,
+            top_k=top_k,
+            include_metadata=True,
+        )
+
+        docs = []
+        for match in results.matches:
+            metadata = dict(match.metadata)
+            text = metadata.pop("text", "")
+            docs.append(Document(page_content=text, metadata=metadata))
+        logger.info(f"Hybrid search returned {len(docs)} docs for: {question[:30]}...")
+        return docs
 
     def _is_unable_to_answer(self, answer: str) -> bool:
         """回答不可かどうかを判定"""
@@ -500,8 +535,8 @@ class RAGService:
         try:
             logger.info(f"Processing question: {question[:50]}...")
 
-            # 関連ドキュメントを検索（k=10で取得）
-            candidate_docs = self.retriever.invoke(question)
+            # 関連ドキュメントを検索（Hybrid Search: dense + sparse BM25）
+            candidate_docs = self._hybrid_search(question)
 
             # リランキングで上位3件を選択（関連度スコア0.5未満は除外）
             source_docs, top_score = self._rerank_documents(question, candidate_docs, top_n=3, min_score=0.5)

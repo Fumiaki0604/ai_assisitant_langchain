@@ -112,14 +112,16 @@ def delete_vectors(vector_ids: list, index_name: str) -> list:
 
 def save_docs_with_ids(documents: list, id_prefixes: list, text_splitter, index_name: str) -> list:
     """
-    決定論的IDでPineconeに保存。
+    決定論的IDでPineconeにHybrid Search（dense + sparse BM25）で保存。
 
     documents: list of {"content": str, "metadata": dict} または LangChain Document
     id_prefixes: list of str, ドキュメントごとに1つ
     Returns: list of list of vector_ids（ドキュメントごとのベクターIDリスト）
     """
-    from langchain_pinecone import PineconeVectorStore
+    from pinecone import Pinecone
+    from pinecone_text.sparse import BM25Encoder
     from src.rag.embeddings import get_embeddings
+    from config.settings import settings as _settings
 
     embeddings = get_embeddings()
     all_texts = []
@@ -146,13 +148,25 @@ def save_docs_with_ids(documents: list, id_prefixes: list, text_splitter, index_
             doc_id_lists[doc_i].append(vec_id)
 
     if all_texts:
-        PineconeVectorStore.from_texts(
-            texts=all_texts,
-            embedding=embeddings,
-            metadatas=all_metadatas,
-            ids=all_ids,
-            index_name=index_name
-        )
-        logger.info(f"Saved {len(all_texts)} chunks with deterministic IDs to Pinecone")
+        bm25 = BM25Encoder().default()
+        dense_vectors = embeddings.embed_documents(all_texts)
+        sparse_vectors = bm25.encode_documents(all_texts)
+
+        vectors = [
+            {
+                "id": all_ids[i],
+                "values": dense_vectors[i],
+                "sparse_values": sparse_vectors[i],
+                "metadata": {**all_metadatas[i], "text": all_texts[i]},
+            }
+            for i in range(len(all_texts))
+        ]
+
+        pc = Pinecone(api_key=_settings.pinecone_api_key)
+        index = pc.Index(index_name)
+        for batch_start in range(0, len(vectors), 100):
+            index.upsert(vectors=vectors[batch_start:batch_start + 100])
+
+        logger.info(f"Saved {len(all_texts)} chunks with hybrid vectors (dense+sparse) to Pinecone")
 
     return doc_id_lists

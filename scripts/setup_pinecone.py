@@ -39,7 +39,7 @@ def setup_pinecone_index():
             pc.create_index(
                 name=settings.pinecone_index_name,
                 dimension=1024,  # Bedrock Embeddings (Titan Text Embeddings V2) の次元数
-                metric='cosine',
+                metric='dotproduct',  # hybrid search（sparse + dense）対応
                 spec=ServerlessSpec(
                     cloud='aws',
                     region='us-east-1'
