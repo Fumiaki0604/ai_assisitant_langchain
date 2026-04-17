@@ -225,6 +225,8 @@ Resources:
               Value: CME3BV4PN,C061Q3XQMPA,C02LQGXAY69
             - Name: SLACK_KNOWLEDGE_CHANNELS
               Value: C0551545GU8,CH4B7A2FJ
+            - Name: SLACK_NO_WEB_SEARCH_CHANNELS
+              Value: C02LQGXAY69
             - Name: GOOGLE_DRIVE_FOLDER_ID
               Value: 0AC0oLVMcTPpcUk9PVA
             - Name: S3_STATE_BUCKET

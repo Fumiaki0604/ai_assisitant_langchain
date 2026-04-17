@@ -36,6 +36,9 @@ feedback_logger = get_feedback_logger()
 # 自動返信対象チャンネルのリスト
 AUTO_REPLY_CHANNELS = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
 
+# Web検索しないチャンネルのリスト
+NO_WEB_SEARCH_CHANNELS = [ch.strip() for ch in settings.slack_no_web_search_channels.split(',') if ch.strip()]
+
 # URL抽出用の正規表現
 URL_PATTERN = re.compile(r'https?://[^\s<>]+')
 
@@ -213,7 +216,7 @@ def handle_mention(event, say, client):
 
         # RAGで回答を生成
         logger.info(f"Processing question with RAG: {clean_text}")
-        result = rag_service.answer_question(clean_text, url_content, images=images)
+        result = rag_service.answer_question(clean_text, url_content, images=images, skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS))
 
         # 回答を整形
         answer_text = result['answer']
@@ -360,7 +363,7 @@ def handle_message_events(event, say, client):
             url_content = rag_service.fetch_url_content(fetched_url)
 
         # RAGで回答を生成
-        result = rag_service.answer_question(text, url_content, images=images)
+        result = rag_service.answer_question(text, url_content, images=images, skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS))
 
         # 回答を整形
         answer_text = result['answer']

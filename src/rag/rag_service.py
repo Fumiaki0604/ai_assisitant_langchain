@@ -516,7 +516,7 @@ class RAGService:
             return result.content
         return result
 
-    def answer_question(self, question: str, url_content: str = "", images: list = None) -> dict:
+    def answer_question(self, question: str, url_content: str = "", images: list = None, skip_web_search: bool = False) -> dict:
         """
         質問に対してRAGで回答を生成
 
@@ -554,7 +554,7 @@ class RAGService:
             web_results = []
             should_web_search = False
 
-            if not is_internal_only:
+            if not is_internal_only and not skip_web_search:
                 # 内部ソースがない、または関連度が低い場合
                 has_internal_sources = sources_by_type['drive'] or sources_by_type['slack']
                 if not has_internal_sources:

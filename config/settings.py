@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     slack_signing_secret: str
     slack_auto_reply_channels: str = ""  # カンマ区切りのチャンネルID（自動返信対象）
     slack_knowledge_channels: str = ""  # カンマ区切りのチャンネルID（RAG取り込みのみ、返信なし）
+    slack_no_web_search_channels: str = ""  # カンマ区切りのチャンネルID（Web検索しない）
 
     # Confluence (Optional)
     confluence_base_url: Optional[str] = None
