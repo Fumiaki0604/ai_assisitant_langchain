@@ -222,7 +222,7 @@ Resources:
             - Name: PINECONE_INDEX_NAME
               Value: slack-ai-assistant
             - Name: SLACK_AUTO_REPLY_CHANNELS
-              Value: CME3BV4PN,C061Q3XQMPA
+              Value: CME3BV4PN,C061Q3XQMPA,C02LQGXAY69
             - Name: SLACK_KNOWLEDGE_CHANNELS
               Value: C0551545GU8,CH4B7A2FJ
             - Name: GOOGLE_DRIVE_FOLDER_ID
@@ -352,7 +352,7 @@ Resources:
             - Name: PINECONE_INDEX_NAME
               Value: slack-ai-assistant
             - Name: SLACK_AUTO_REPLY_CHANNELS
-              Value: CME3BV4PN,C061Q3XQMPA
+              Value: CME3BV4PN,C061Q3XQMPA,C02LQGXAY69
             - Name: GOOGLE_DRIVE_FOLDER_ID
               Value: 0AC0oLVMcTPpcUk9PVA
           Secrets:
