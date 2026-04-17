@@ -5,10 +5,10 @@ RAG（検索拡張生成）を使用してSlack内の質問に自動回答する
 
 ## 技術スタック
 
-- **言語**: Python 3.11+
-- **LLM**: AWS Bedrock (Claude 3.5 Sonnet)
-- **ベクトルDB**: Pinecone (Amazon Titan Embeddings V2, 1024次元)
-- **リランキング**: Cohere Rerank Multilingual v3
+- **言語**: Python 3.12
+- **LLM**: AWS Bedrock (`us.anthropic.claude-sonnet-4-6`)
+- **ベクトルDB**: Pinecone (Amazon Titan Embeddings V2, 1024次元) + **Hybrid Search** (dense + BM25 sparse)
+- **リランキング**: Cohere Rerank Multilingual v3（オプション）
 - **Slackフレームワーク**: slack-bolt (Socket Mode)
 - **インフラ**: AWS ECS Fargate / ECR / CloudWatch / Secrets Manager
 
@@ -26,13 +26,13 @@ Slackリクエストタイプ分類（LLM）
   ├─ DOCUMENT   → 社内資料探索（Web検索・説明禁止）
   ├─ OWNER      → 担当者探索（Web検索・説明禁止）
   └─ OPINION    → 通常RAGフロー
-Pinecone検索（similarity_score_threshold=0.5）
+Pinecone Hybrid Search（dense Titan + sparse BM25, alpha=0.7）
   ↓
-Cohere Rerank（min_score=0.5）
+Cohere Rerank（min_score=0.5）または フォールバックスコアリング
   ↓
 内部ナレッジ十分？（KNOWLEDGEのみ判定）
   ├─ Yes → RAGプロンプトで回答生成 → Grounding検証
-  └─ No  → Web検索フォールバック（コンテンツ取得）
+  └─ No  → Web検索フォールバック（DuckDuckGo + コンテンツ取得）
            → 3層構造プロンプトで回答生成
   ↓
 Slack Reply（参考情報 + 信頼度スコア + フィードバックボタン）
@@ -42,22 +42,23 @@ Slack Reply（参考情報 + 信頼度スコア + フィードバックボタン
 
 ## 機能
 
-- **自動返信チャンネル**: 指定チャンネルの全メッセージに自動応答
+- **自動返信チャンネル**: 指定チャンネルの全メッセージに自動応答（メンション不要）
 - **メンション応答**: `@bot` で任意のチャンネルから質問可能
+- **チャンネル別Web検索制御**: `SLACK_NO_WEB_SEARCH_CHANNELS` でWeb検索を無効化（ヘルプデスク等）
 - **メッセージ意図分類**: 質問/共有を自動判定し、共有にはリアクションのみ返す
 - **5タイプリクエスト分類**: KNOWLEDGE / EXPERIENCE / DOCUMENT / OWNER / OPINION を自動判定
 - **社内探索モード**: EXPERIENCE/DOCUMENT/OWNER はWeb検索・説明を省略し「あるかないか」だけ返す
-- **2段階フィルタリング**: Pinecone類似度閾値 + Cohere Rerankで無関係ドキュメントを除外
+- **Hybrid Search**: dense（意味検索）+ sparse（BM25キーワード）で固有名詞の精度を向上
+- **2段階フィルタリング**: Pinecone Hybrid Search + Cohere Rerankで無関係ドキュメントを除外
 - **Web検索フォールバック**: 社内ナレッジ不足時にDuckDuckGoで検索しページ内容も取得
 - **回答のGrounding検証**: 回答が参考資料に基づいているかLLMで検証
-- **信頼度スコア**: 関連度 x 整合性で信頼度を表示
+- **信頼度スコア**: 関連度 × 整合性で信頼度を表示（🟢高 / 🟡中 / 🔴低）
 - **フィードバック**: 👍/👎 ボタン・リアクションで回答品質を記録
 - **自動採点ログ**: 回答ごとに5軸100点ルーブリックでLLM採点しS3/ローカルに記録
 - **人間優先**: 人間が先に返信済みのスレッドはスキップ
 - **複数データソース**: Slack履歴 / Google Drive / Notion / PDF / Markdown
-- **NotionPDF自動取得**: NotionデータベースのURLプロパティに格納されたPDF（外部CDN含む）を自動ダウンロードしてRAGに取り込む
-- **Google Drive OCR**: PyPDF2では文字化けするスキャンPDF・画像PDFをGoogle Drive OCR（PDF→Google Doc変換）で正確にテキスト抽出
-- **週次自動sync（差分更新）**: ECS Scheduled TaskでSlack履歴・Google Drive・NotionをPineconeへ増分同期（S3で状態管理）
+- **Google Drive OCR**: スキャンPDF・画像PDFをOCRで正確にテキスト抽出
+- **週次自動sync（差分更新）**: ECS Scheduled TaskでSlack履歴・Google DriveをPineconeへ増分同期（S3で状態管理）
 - **画像対応**: Slackに添付された画像をBedrockのマルチモーダルで解析して回答
 
 ## セットアップ
@@ -77,15 +78,27 @@ cp .env.example .env
 ```
 
 必須環境変数:
+
 | 変数 | 説明 |
 |---|---|
 | `PINECONE_API_KEY` | Pinecone API キー |
 | `PINECONE_ENVIRONMENT` | Pinecone 環境 |
 | `SLACK_BOT_TOKEN` | Slack Bot OAuth トークン |
-| `SLACK_APP_TOKEN` | Slack App レベルトークン |
+| `SLACK_APP_TOKEN` | Slack App レベルトークン（Socket Mode用） |
 | `SLACK_SIGNING_SECRET` | Slack署名シークレット |
 | `SLACK_AUTO_REPLY_CHANNELS` | 自動返信対象チャンネルID（カンマ区切り） |
-| `COHERE_API_KEY` | Cohere API キー（リランキング用） |
+
+任意環境変数:
+
+| 変数 | 説明 |
+|---|---|
+| `SLACK_NO_WEB_SEARCH_CHANNELS` | Web検索を無効にするチャンネルID（カンマ区切り） |
+| `SLACK_KNOWLEDGE_CHANNELS` | RAG取り込みのみ（返信なし）のチャンネルID |
+| `COHERE_API_KEY` | Cohere API キー（リランキング精度向上） |
+| `NOTION_API_KEY` | Notion インテグレーションシークレット |
+| `GOOGLE_DRIVE_FOLDER_ID` | Google DriveフォルダID |
+| `S3_STATE_BUCKET` | 増分同期の状態管理バケット名 |
+| `PINECONE_HYBRID_ALPHA` | dense/sparse比率（デフォルト: 0.7） |
 
 AWS認証はAWS CLI設定済み or IAMロール（ECS）。
 
@@ -95,25 +108,14 @@ AWS認証はAWS CLI設定済み or IAMロール（ECS）。
 python scripts/setup_pinecone.py
 ```
 
+> インデックスは `dotproduct` メトリクスで作成されます（Hybrid Search必須）。
+
 ### 4. ドキュメント登録
 
 ```bash
 python scripts/load_all_documents.py --slack CME3BV4PN    # Slack履歴
 python scripts/load_all_documents.py --files ./documents  # ファイル
 python scripts/load_all_documents.py --all                # 全ソース
-```
-
-Notionの取り込み（単体実行）:
-
-```bash
-# 全ページを取り込む
-python src/loaders/notion_loader.py
-
-# 特定ページIDを指定して取り込む
-python src/loaders/notion_loader.py <PAGE_ID>
-
-# キーワードで検索して取り込む
-python src/loaders/notion_loader.py --search "ホワイトペーパー"
 ```
 
 ### 5. 起動
@@ -132,21 +134,27 @@ docker-compose up -d --build
 ```
 slack-ai-assistant/
 ├── src/
-│   ├── slack/bot.py           # メインエントリポイント（イベント処理）
-│   ├── slack/image_handler.py # Slack添付画像の取得・リサイズ・base64変換
-│   ├── rag/rag_service.py     # RAGサービス（検索・リランク・回答生成・タイプ分類）
-│   ├── rag/embeddings.py      # Amazon Titan Embeddings V2
-│   ├── llm/bedrock.py         # Bedrock Claude 3.5 Sonnet
-│   ├── loaders/               # データローダー（Slack/ファイル/Notion/Google Drive）
+│   ├── slack/
+│   │   ├── bot.py             # メインエントリポイント（イベント処理）
+│   │   └── image_handler.py   # Slack添付画像の取得・リサイズ・base64変換
+│   ├── rag/
+│   │   ├── rag_service.py     # RAGサービス（検索・リランク・回答生成）
+│   │   ├── classifier.py      # LLM分類器（意図・リクエストタイプ判定）
+│   │   ├── reranker.py        # Cohere Rerank + フォールバック / Grounding検証
+│   │   ├── web_searcher.py    # DuckDuckGo検索 / URLコンテンツ取得
+│   │   ├── prompts.py         # プロンプトテンプレート
+│   │   └── embeddings.py      # Amazon Titan Embeddings V2
+│   ├── llm/bedrock.py         # Bedrock LLM
+│   ├── loaders/               # データローダー（Slack / ファイル / Notion / Google Drive）
 │   ├── loaders/sync_state.py  # 増分同期の状態管理（S3/ローカル）
 │   ├── feedback/              # フィードバック記録
-│   ├── evaluation/evaluator.py # 5軸ルーブリック自動採点・ログ保存
+│   ├── evaluation/            # 5軸ルーブリック自動採点・ログ保存
 │   └── auth/                  # Google認証
 ├── config/settings.py         # Pydantic Settings（.envから自動読み込み）
 ├── deploy/cloudformation.yml  # AWS CloudFormationテンプレート
 ├── scripts/
 │   ├── sync_pinecone_data.py  # 増分同期スクリプト（ECS Scheduled Task）
-│   ├── eval_report.py         # 採点ログ集計レポート（CLI呼び出し用）
+│   ├── eval_report.py         # 採点ログ集計レポート
 │   └── ...                    # その他ユーティリティ
 └── data/                      # ローカルデータ（gitignore対象）
 ```
@@ -154,10 +162,12 @@ slack-ai-assistant/
 ## AWS デプロイ
 
 ```bash
+# ECRログイン
+aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 433864970174.dkr.ecr.us-west-2.amazonaws.com
+
 # ビルド・プッシュ
 docker build -t slack-ai-assistant:latest .
 docker tag slack-ai-assistant:latest 433864970174.dkr.ecr.us-west-2.amazonaws.com/slack-ai-assistant:latest
-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 433864970174.dkr.ecr.us-west-2.amazonaws.com
 docker push 433864970174.dkr.ecr.us-west-2.amazonaws.com/slack-ai-assistant:latest
 
 # デプロイ
@@ -167,66 +177,16 @@ aws ecs update-service --cluster slack-ai-assistant-cluster --service slack-ai-a
 aws logs tail /ecs/slack-ai-assistant --follow --region us-west-2
 ```
 
-## Notionデータソースについて
-
-### NotionデータベースのPDF取り込み
-
-Notionデータベースにはページ本文（ブロック）だけでなく、URLプロパティとしてPDFリンクが格納されているケースがある（HubSpot CDN等の外部ホスティングPDFなど）。
-
-`src/loaders/notion_loader.py` は以下の2段階でコンテンツを取得する:
-
-```
-Notionページ
-  ├─ ブロックAPI → 本文テキストを取得
-  └─ プロパティAPI → URLプロパティ・リッチテキストプロパティを走査
-                      ↓ .pdf を含むURLを検出
-                      PDFをダウンロード（requests）
-                      ↓
-                      pypdf でテキスト抽出
-                      ↓
-                      ブロックテキストと結合 → Pineconeへ
-```
-
-#### 対応するNotionプロパティ型
-
-| プロパティ型 | 対応 | 備考 |
-|---|---|---|
-| `url` | ✅ | URL直接入力フィールド |
-| `rich_text` | ✅ | リンク付きテキストフィールド |
-| ブロック本文 | ✅ | 段落・見出し・コード等 |
-
-#### Notionの統合設定
-
-NOTION_API_KEY（インテグレーションのシークレット）を `.env` に設定し、取り込み対象のデータベース・ページにそのインテグレーションのアクセス権を付与する。
-
-```env
-NOTION_API_KEY=secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### メッセージ意図分類の挙動
+## メッセージ意図分類の挙動
 
 ボットは受信メッセージを `question`（質問）/ `share`（共有・報告）に分類してから応答を決定する。
 
 | 分類 | 投稿例 | ボットの動作 |
 |---|---|---|
-| `question` | 「@here Airecoの最新の汎用資料をお持ちの方がいらっしゃったら共有いただけると嬉しいです」 | RAGで検索し、社内ナレッジから該当資料を返答 |
+| `question` | 「Airecoの最新の汎用資料をお持ちの方がいらっしゃったら共有いただけると嬉しいです」 | RAGで検索し、社内ナレッジから該当資料を返答 |
 | `question` | 「メルカートのオプション機能一覧はどこで見れますか？」 | RAGで検索して回答 |
-| `share` | 「jQuery4系対応関連のドキュメントをざっと作成しました（初稿）」 | お礼・acknowledgmentのみ返す（RAGは動かない） |
-| `share` | 「本日の定例MTGの議事録を共有します」 | お礼・acknowledgmentのみ返す |
-
-`@here` や `@channel` のような全体向け呼びかけを含む投稿も、情報を求めている内容であれば `question` として扱われRAGが動作する。
-
-## 回答品質の設計思想
-
-- **冒頭1文で結論**: 「社内で明確な類似実績は確認できていませんが、一般的には〜」のように免責と価値提供を1文でつなぐ
-- **核心の制約には構造的代替案**: セキュリティ制限・技術的障壁に対して施策列挙だけでなく、技術×運用の中間案（例：ID連携せずメール認証で仮紐付け）まで踏み込む
-- **「当社視点」は根拠があるときだけ**: 社内参考情報に根拠がない場合は「当社実績は未確認ですが」と明示し、推測を事実のように見せない
-- **Web検索は本文に織り込む**: 「〜が一般的とされています」のように本文に自然に統合し、参考URLは末尾にまとめて掲載
-- **最後に方向性を示す**: 「〜という設計が、○○と△△のバランスを取りやすいと考えられます」のように結論方向を1〜2文で締める
-- **逃げない回答**: 社内データがなくても「回答できません」で終わらせない
-- **共有には共感**: 質問でないメッセージには無理に回答せず、自然なリアクションを返す
-- **ノイズ除去**: 2段階フィルタリング（Pinecone閾値 + Cohere Rerank）で無関係ドキュメントを確実に弾く
-- **透明性**: 参考情報のソース・信頼度スコアを必ず表示し、根拠を明示する
+| `share` | 「jQuery4系対応関連のドキュメントをざっと作成しました（初稿）」 | 共感・acknowledgmentのみ返す（RAGは動かない） |
+| `share` | 「本日の定例MTGの議事録を共有します」 | 共感・acknowledgmentのみ返す |
 
 ## 回答品質の自動採点ログ
 
@@ -240,29 +200,10 @@ NOTION_API_KEY=secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | ④社内文脈理解 | Slackの社内会話トーンに合っているか |
 | ⑤次の行動の妥当性 | 適切な次アクションを示しているか（EXPERIENCE/OWNERでは提案不要） |
 
-回答のたびにLLMが自動採点し、S3（`eval_logs/{date}/*.json`）またはローカル（`logs/eval_log.jsonl`）に記録する。
-
-### 採点ログの確認
-
 ```bash
 python scripts/eval_report.py          # 過去30日
 python scripts/eval_report.py --days 7 # 過去7日
 ```
-
-出力例:
-```
-=== 評価レポート（過去30日間 / 12件） ===
-
-【軸別 平均スコア / 0点件数】
-  ①質問タイプ理解: 8.3/20  (0点: 4件 / 33%) ⚠️
-  ...
-
-【低スコア事例（3件 / 60点未満）】
-  [28点 / experience] 採用サイトの事例を集めてます...
-    → ①質問タイプ誤認（q1=0）
-```
-
-レポートを確認後、Claude Codeに改善指示を伝えることでプロンプトを修正できる。
 
 ## Google Drive OCRについての注意
 
