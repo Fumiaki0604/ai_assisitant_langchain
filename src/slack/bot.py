@@ -4,13 +4,13 @@ Slackボットのメイン実装
 import sys
 import os
 
-# プロジェクトルートをPythonパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from config.settings import settings
 from src.rag.rag_service import get_rag_service
+from src.rag.web_searcher import fetch_url_content
 from src.feedback.feedback_logger import get_feedback_logger
 from src.loaders.slack_loader import SlackHistoryLoader
 from src.slack.image_handler import fetch_images_from_event
@@ -21,31 +21,21 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Slackアプリの初期化
 app = App(
     token=settings.slack_bot_token,
     signing_secret=settings.slack_signing_secret
 )
 
-# RAGサービスを取得
 rag_service = get_rag_service()
-
-# フィードバックロガーを取得
 feedback_logger = get_feedback_logger()
 
-# 自動返信対象チャンネルのリスト
 AUTO_REPLY_CHANNELS = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
-
-# Web検索しないチャンネルのリスト
 NO_WEB_SEARCH_CHANNELS = [ch.strip() for ch in settings.slack_no_web_search_channels.split(',') if ch.strip()]
 
-# URL抽出用の正規表現
 URL_PATTERN = re.compile(r'https?://[^\s<>]+')
 
 
 def extract_urls(text: str) -> list:
-    """テキストからURLを抽出"""
-    # Slackの<URL|表示テキスト>形式も処理
     slack_urls = re.findall(r'<(https?://[^|>]+)(?:\|[^>]*)?>',  text)
     plain_urls = URL_PATTERN.findall(text)
     return list(set(slack_urls + plain_urls))
@@ -55,35 +45,24 @@ def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
     """ソース別の参考ドキュメントセクションをフォーマット"""
     sections = []
 
-    # ①ナレッジ(GoogleDrive)
     drive_sources = sources_by_type.get('drive', [])
     if drive_sources and not is_unable:
-        count = len(drive_sources)
-        section = f"*①ナレッジ(GoogleDrive)から類似事例を検索*\n{count}件見つかりました。"
+        section = f"*①ナレッジ(GoogleDrive)から類似事例を検索*\n{len(drive_sources)}件見つかりました。"
         for src in drive_sources[:3]:
-            if src.get('link'):
-                section += f"\n• <{src['link']}|{src['title']}>"
-            else:
-                section += f"\n• {src['title']}"
+            section += f"\n• <{src['link']}|{src['title']}>" if src.get('link') else f"\n• {src['title']}"
         sections.append(section)
     else:
         sections.append("*①ナレッジ(GoogleDrive)から類似事例を検索*\n該当なし")
 
-    # ②Slackの過去事例
     slack_sources = sources_by_type.get('slack', [])
     if slack_sources and not is_unable:
-        count = len(slack_sources)
-        section = f"*②Slackの過去事例*\n{count}件見つかりました。"
+        section = f"*②Slackの過去事例*\n{len(slack_sources)}件見つかりました。"
         for src in slack_sources[:3]:
-            if src.get('link'):
-                section += f"\n• <{src['link']}|{src['title']}>"
-            else:
-                section += f"\n• {src['title']}"
+            section += f"\n• <{src['link']}|{src['title']}>" if src.get('link') else f"\n• {src['title']}"
         sections.append(section)
     else:
         sections.append("*②Slackの過去事例*\n該当なし")
 
-    # ③Web検索の結果
     web_sources = sources_by_type.get('web', [])
     if web_sources:
         section = "*③Web検索の結果*"
@@ -97,7 +76,6 @@ def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
 
 
 def format_confidence_indicator(confidence_score: float, grounding_warning: str = None) -> str:
-    """信頼度インジケーターをフォーマット"""
     if confidence_score >= 0.7:
         indicator = "🟢 高"
     elif confidence_score >= 0.4:
@@ -106,345 +84,156 @@ def format_confidence_indicator(confidence_score: float, grounding_warning: str 
         indicator = "🔴 低"
 
     text = f"*回答の信頼度:* {indicator} ({confidence_score:.0%})"
-
     if grounding_warning:
         text += f"\n⚠️ {grounding_warning}"
-
     return text
 
 
-def has_human_reply(client, channel, thread_ts):
-    """
-    スレッド内に人間（ボット以外）の返信があるかチェック
-    """
+def _get_thread_reply_status(client, channel: str, thread_ts: str) -> tuple:
+    """(has_human_reply, has_bot_reply) を返す"""
     try:
-        # ボットのユーザーIDを取得
         bot_user_id = client.auth_test()["user_id"]
-
-        # スレッドの返信を取得
-        result = client.conversations_replies(
-            channel=channel,
-            ts=thread_ts,
-            limit=100
-        )
-
-        messages = result.get("messages", [])
-
-        # 最初のメッセージ（質問）以外をチェック
-        for msg in messages[1:]:
-            # ボット自身のメッセージはスキップ
+        result = client.conversations_replies(channel=channel, ts=thread_ts, limit=100)
+        has_human = has_bot = False
+        for msg in result.get("messages", [])[1:]:
             if msg.get("user") == bot_user_id or msg.get("bot_id"):
-                continue
-
-            # 人間の返信が見つかった
-            logger.info(f"Human reply found in thread {thread_ts}")
-            return True
-
-        return False
-
+                has_bot = True
+            else:
+                has_human = True
+        return has_human, has_bot
     except Exception as e:
         logger.error(f"Error checking thread replies: {e}")
-        return False
+        return False, False
 
 
-def has_bot_replied(client, channel, thread_ts):
-    """
-    ボットが既にスレッドに返信済みかチェック
-    """
-    try:
-        # ボットのユーザーIDを取得
-        bot_user_id = client.auth_test()["user_id"]
+def _build_reply_blocks(answer_text: str, question_text: str) -> list:
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": answer_text}},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "_この回答は役に立ちましたか？_"}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👍 良い", "emoji": True},
+                    "style": "primary",
+                    "action_id": "feedback_positive",
+                    "value": question_text
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👎 改善が必要", "emoji": True},
+                    "action_id": "feedback_negative",
+                    "value": question_text
+                }
+            ]
+        }
+    ]
 
-        # スレッドの返信を取得
-        result = client.conversations_replies(
-            channel=channel,
-            ts=thread_ts,
-            limit=100
+
+def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event: dict, say):
+    """質問への回答と返信を処理する共通ロジック"""
+    images = fetch_images_from_event(event, settings.slack_bot_token)
+
+    intent_result = rag_service.classify_message_intent(text)
+    if intent_result["intent"] == "share":
+        say(text=intent_result["acknowledgment"], thread_ts=thread_ts)
+        logger.info(f"Acknowledgment sent (share message)")
+        return
+
+    url_content = ""
+    urls = extract_urls(text)
+    if urls:
+        logger.info(f"Fetching URL: {urls[0]}")
+        url_content = fetch_url_content(urls[0])
+
+    result = rag_service.answer_question(
+        text, url_content, images=images,
+        skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS)
+    )
+
+    answer_text = result['answer']
+
+    sources_section = format_sources_section(
+        result.get('sources_by_type', {}),
+        result.get('is_unable_to_answer', False)
+    )
+    if sources_section:
+        answer_text += "\n\n---\n*参考情報*\n" + sources_section
+
+    if not result.get('is_unable_to_answer', False):
+        answer_text += "\n\n" + format_confidence_indicator(
+            result.get('confidence_score', 0.0),
+            result.get('grounding_warning')
         )
 
-        messages = result.get("messages", [])
+    say(
+        text=answer_text,
+        blocks=_build_reply_blocks(answer_text, text),
+        thread_ts=thread_ts
+    )
+    logger.info(f"Response sent to {user}")
 
-        # ボット自身の返信があるかチェック
-        for msg in messages[1:]:  # 最初のメッセージ（質問）以外
-            if msg.get("user") == bot_user_id or msg.get("bot_id"):
-                logger.info(f"Bot has already replied to thread {thread_ts}")
-                return True
-
-        return False
-
-    except Exception as e:
-        logger.error(f"Error checking bot replies: {e}")
-        return False
+    evaluate_and_log(
+        question=text,
+        answer=result['answer'],
+        question_type=result.get('question_type', 'knowledge'),
+        channel=channel,
+        user=user,
+        thread_ts=thread_ts,
+    )
 
 
 @app.event("app_mention")
 def handle_mention(event, say, client):
-    """
-    ボットがメンションされた時の処理
-    """
     try:
-        user = event["user"]
-        text = event["text"]
-        channel = event["channel"]
+        text = re.sub(r'<@[A-Z0-9]+>', '', event["text"]).strip()
         thread_ts = event.get("thread_ts") or event["ts"]
-
-        logger.info(f"Received mention from {user}: {text}")
-
-        # ボットのメンションを削除してクリーンなテキストを取得
-        clean_text = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
-
-        # 画像ファイルを取得
-        images = fetch_images_from_event(event, settings.slack_bot_token)
-
-        # メッセージの意図を分類（質問 vs 共有・連絡）
-        intent_result = rag_service.classify_message_intent(clean_text)
-
-        if intent_result["intent"] == "share":
-            # 共有・連絡にはリアクションのみ返す
-            say(text=intent_result["acknowledgment"], thread_ts=thread_ts)
-            logger.info(f"Acknowledgment sent to {user} (share message)")
-            return
-
-        # URLがあればコンテンツを取得
-        urls = extract_urls(clean_text)
-        url_content = ""
-        fetched_url = ""
-        if urls:
-            fetched_url = urls[0]
-            logger.info(f"Fetching URL: {fetched_url}")
-            url_content = rag_service.fetch_url_content(fetched_url)
-
-        # RAGで回答を生成
-        logger.info(f"Processing question with RAG: {clean_text}")
-        result = rag_service.answer_question(clean_text, url_content, images=images, skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS))
-
-        # 回答を整形
-        answer_text = result['answer']
-
-        # 信頼度インジケーターを追加
-        confidence_section = ""
-        if not result.get('is_unable_to_answer', False):
-            confidence_section = format_confidence_indicator(
-                result.get('confidence_score', 0.0),
-                result.get('grounding_warning')
-            )
-
-        # ソースセクションを表示
-        sources_section = format_sources_section(
-            result.get('sources_by_type', {}),
-            result.get('is_unable_to_answer', False)
-        )
-
-        if sources_section:
-            answer_text += "\n\n---\n*参考情報*\n" + sources_section
-
-        if confidence_section:
-            answer_text += "\n\n" + confidence_section
-
-        # Block Kitでフィードバックボタン付きメッセージを送信
-        blocks = [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": answer_text}
-            },
-            {"type": "divider"},
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "_この回答は役に立ちましたか？_"}
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "👍 良い", "emoji": True},
-                        "style": "primary",
-                        "action_id": "feedback_positive",
-                        "value": clean_text
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "👎 改善が必要", "emoji": True},
-                        "action_id": "feedback_negative",
-                        "value": clean_text
-                    }
-                ]
-            }
-        ]
-
-        say(
-            text=answer_text,
-            blocks=blocks,
-            thread_ts=thread_ts
-        )
-
-        logger.info(f"Response sent to {user}")
-
-        evaluate_and_log(
-            question=clean_text,
-            answer=result['answer'],
-            question_type=result.get('question_type', 'knowledge'),
-            channel=channel,
-            user=user,
-            thread_ts=thread_ts,
-        )
-
+        logger.info(f"Received mention from {event['user']}: {text}")
+        _answer_and_reply(text, event["channel"], thread_ts, event["user"], event, say)
     except Exception as e:
         logger.error(f"Error handling mention: {e}", exc_info=True)
         say(
             text=f"申し訳ございません。エラーが発生しました: {str(e)}",
-            thread_ts=thread_ts
+            thread_ts=event.get("thread_ts") or event.get("ts")
         )
 
 
 @app.event("message")
 def handle_message_events(event, say, client):
-    """
-    メッセージイベントの処理
-    自動返信チャンネルでは全メッセージに反応
-    """
     try:
-        # サブタイプのあるメッセージ（編集、削除など）は無視
-        if event.get("subtype"):
+        if event.get("subtype") or event.get("bot_id"):
             return
 
-        # ボット自身のメッセージは無視
-        if event.get("bot_id"):
-            return
-
-        # メンションを含むメッセージは無視（app_mentionイベントで処理）
         text = event.get("text", "")
         if re.search(r'<@[A-Z0-9]+>', text):
             return
 
         channel = event.get("channel")
-        text = event.get("text", "")
-        user = event.get("user")
-        ts = event.get("ts")
-        thread_ts = event.get("thread_ts")
-
-        # 自動返信対象チャンネルでない場合はスキップ
         if channel not in AUTO_REPLY_CHANNELS:
             return
 
-        # スレッド内のメッセージの場合
+        thread_ts = event.get("thread_ts")
+        ts = event.get("ts")
+
         if thread_ts:
-            # 人間の返信がある場合はスキップ
-            if has_human_reply(client, channel, thread_ts):
+            has_human, has_bot = _get_thread_reply_status(client, channel, thread_ts)
+            if has_human:
                 logger.info(f"Skipping: Human has already replied to thread {thread_ts}")
                 return
-
-            # ボットが既に返信済みの場合はスキップ
-            if has_bot_replied(client, channel, thread_ts):
+            if has_bot:
                 logger.info(f"Skipping: Bot has already replied to thread {thread_ts}")
                 return
 
-        # 新しい質問（スレッドでない）またはまだ誰も返信していないスレッド
-        logger.info(f"Auto-replying to message from {user} in channel {channel}: {text}")
-
-        # 画像ファイルを取得
-        images = fetch_images_from_event(event, settings.slack_bot_token)
-
-        # メッセージの意図を分類（質問 vs 共有・連絡）
-        intent_result = rag_service.classify_message_intent(text)
-
-        if intent_result["intent"] == "share":
-            say(text=intent_result["acknowledgment"], thread_ts=thread_ts or ts)
-            logger.info(f"Acknowledgment sent (share message)")
-            return
-
-        # URLがあればコンテンツを取得
-        urls = extract_urls(text)
-        url_content = ""
-        fetched_url = ""
-        if urls:
-            fetched_url = urls[0]
-            logger.info(f"Fetching URL: {fetched_url}")
-            url_content = rag_service.fetch_url_content(fetched_url)
-
-        # RAGで回答を生成
-        result = rag_service.answer_question(text, url_content, images=images, skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS))
-
-        # 回答を整形
-        answer_text = result['answer']
-
-        # 信頼度インジケーターを追加
-        confidence_section = ""
-        if not result.get('is_unable_to_answer', False):
-            confidence_section = format_confidence_indicator(
-                result.get('confidence_score', 0.0),
-                result.get('grounding_warning')
-            )
-
-        # ソースセクションを表示
-        sources_section = format_sources_section(
-            result.get('sources_by_type', {}),
-            result.get('is_unable_to_answer', False)
-        )
-
-        if sources_section:
-            answer_text += "\n\n---\n*参考情報*\n" + sources_section
-
-        if confidence_section:
-            answer_text += "\n\n" + confidence_section
-
-        # Block Kitでフィードバックボタン付きメッセージを送信
-        blocks = [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": answer_text}
-            },
-            {"type": "divider"},
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "_この回答は役に立ちましたか？_"}
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "👍 良い", "emoji": True},
-                        "style": "primary",
-                        "action_id": "feedback_positive",
-                        "value": text
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "👎 改善が必要", "emoji": True},
-                        "action_id": "feedback_negative",
-                        "value": text
-                    }
-                ]
-            }
-        ]
-
-        say(
-            text=answer_text,
-            blocks=blocks,
-            thread_ts=thread_ts or ts
-        )
-
-        logger.info(f"Auto-response sent")
-
-        evaluate_and_log(
-            question=text,
-            answer=result['answer'],
-            question_type=result.get('question_type', 'knowledge'),
-            channel=channel,
-            user=user,
-            thread_ts=thread_ts or ts,
-        )
+        logger.info(f"Auto-replying to message from {event.get('user')} in channel {channel}: {text}")
+        _answer_and_reply(text, channel, thread_ts or ts, event.get("user"), event, say)
 
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
 
 
-@app.action("feedback_positive")
-def handle_feedback_positive(ack, body, client):
-    """
-    👍ボタンクリック時の処理
-    """
+def _handle_feedback(ack, body, client, feedback_type: str, thank_msg: str):
     ack()
     try:
         user = body["user"]["id"]
@@ -455,7 +244,7 @@ def handle_feedback_positive(ack, body, client):
         answer = message.get("text", "")
 
         feedback_logger.log_feedback(
-            feedback_type="positive",
+            feedback_type=feedback_type,
             question=question,
             answer=answer,
             channel=channel,
@@ -463,125 +252,60 @@ def handle_feedback_positive(ack, body, client):
             message_ts=message_ts
         )
 
-        # ボタンを「ありがとうございます」に更新
-        blocks = message.get("blocks", [])[:-1]  # actionsブロックを削除
+        blocks = message.get("blocks", [])[:-1]
         blocks.append({
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "✅ フィードバックありがとうございます！"}]
+            "elements": [{"type": "mrkdwn", "text": thank_msg}]
         })
-
-        client.chat_update(
-            channel=channel,
-            ts=message_ts,
-            text=answer,
-            blocks=blocks
-        )
-
-        logger.info(f"Positive feedback recorded from {user}")
+        client.chat_update(channel=channel, ts=message_ts, text=answer, blocks=blocks)
+        logger.info(f"{feedback_type} feedback recorded from {user}")
 
     except Exception as e:
-        logger.error(f"Error handling positive feedback: {e}", exc_info=True)
+        logger.error(f"Error handling {feedback_type} feedback: {e}", exc_info=True)
+
+
+@app.action("feedback_positive")
+def handle_feedback_positive(ack, body, client):
+    _handle_feedback(ack, body, client, "positive", "✅ フィードバックありがとうございます！")
 
 
 @app.action("feedback_negative")
 def handle_feedback_negative(ack, body, client):
-    """
-    👎ボタンクリック時の処理
-    """
-    ack()
-    try:
-        user = body["user"]["id"]
-        channel = body["channel"]["id"]
-        message = body["message"]
-        message_ts = message["ts"]
-        question = body["actions"][0].get("value", "")
-        answer = message.get("text", "")
-
-        feedback_logger.log_feedback(
-            feedback_type="negative",
-            question=question,
-            answer=answer,
-            channel=channel,
-            user=user,
-            message_ts=message_ts
-        )
-
-        # ボタンを「ありがとうございます」に更新
-        blocks = message.get("blocks", [])[:-1]  # actionsブロックを削除
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "✅ フィードバックありがとうございます！改善に活用します。"}]
-        })
-
-        client.chat_update(
-            channel=channel,
-            ts=message_ts,
-            text=answer,
-            blocks=blocks
-        )
-
-        logger.info(f"Negative feedback recorded from {user}")
-
-    except Exception as e:
-        logger.error(f"Error handling negative feedback: {e}", exc_info=True)
+    _handle_feedback(ack, body, client, "negative", "✅ フィードバックありがとうございます！改善に活用します。")
 
 
 @app.event("reaction_added")
 def handle_reaction_added(event, client):
-    """
-    リアクション追加イベントの処理
-    👍(+1) / 👎(-1) でフィードバックを記録（後方互換）
-    """
+    """リアクション追加イベントの処理（👍/👎フィードバック記録）"""
     try:
         reaction = event.get("reaction")
+        if reaction not in ["+1", "-1", "thumbsup", "thumbsdown"]:
+            return
+
         user = event.get("user")
         item = event.get("item", {})
         channel = item.get("channel")
         message_ts = item.get("ts")
 
-        # 対象のリアクションかチェック
-        if reaction not in ["+1", "-1", "thumbsup", "thumbsdown"]:
-            return
-
-        # ボットのユーザーIDを取得
         bot_user_id = client.auth_test()["user_id"]
-
-        # リアクションが付けられたメッセージを取得
-        result = client.conversations_history(
-            channel=channel,
-            latest=message_ts,
-            limit=1,
-            inclusive=True
-        )
-
+        result = client.conversations_history(channel=channel, latest=message_ts, limit=1, inclusive=True)
         messages = result.get("messages", [])
         if not messages:
             return
 
         message = messages[0]
-
-        # ボットのメッセージかチェック
         if message.get("user") != bot_user_id and not message.get("bot_id"):
             return
 
-        # 元の質問を取得（スレッドの親メッセージ）
-        thread_ts = message.get("thread_ts")
         question = ""
-
+        thread_ts = message.get("thread_ts")
         if thread_ts:
-            thread_result = client.conversations_replies(
-                channel=channel,
-                ts=thread_ts,
-                limit=1
-            )
+            thread_result = client.conversations_replies(channel=channel, ts=thread_ts, limit=1)
             thread_messages = thread_result.get("messages", [])
             if thread_messages:
                 question = thread_messages[0].get("text", "")
 
-        # フィードバックタイプを判定
         feedback_type = "positive" if reaction in ["+1", "thumbsup"] else "negative"
-
-        # フィードバックを記録
         feedback_logger.log_feedback(
             feedback_type=feedback_type,
             question=question,
@@ -590,7 +314,6 @@ def handle_reaction_added(event, client):
             user=user,
             message_ts=message_ts
         )
-
         logger.info(f"Feedback recorded: {feedback_type} from {user}")
 
     except Exception as e:
@@ -598,16 +321,12 @@ def handle_reaction_added(event, client):
 
 
 def load_slack_history_on_startup():
-    """
-    起動時にSlack履歴をPineconeに登録
-    """
     if not AUTO_REPLY_CHANNELS:
         logger.info("No auto-reply channels configured, skipping history load")
         return
 
     logger.info(f"Loading Slack history for channels: {AUTO_REPLY_CHANNELS}")
     loader = SlackHistoryLoader()
-
     for channel_id in AUTO_REPLY_CHANNELS:
         try:
             documents = loader.load_channel_threads(channel_id, limit=200)
@@ -619,18 +338,13 @@ def load_slack_history_on_startup():
 
 
 def start_bot():
-    """
-    ボットを起動
-    """
     logger.info("Starting Slack bot...")
     logger.info(f"Bot token: {settings.slack_bot_token[:20]}...")
     logger.info(f"App token: {settings.slack_app_token[:20]}...")
     logger.info(f"Auto-reply channels: {AUTO_REPLY_CHANNELS}")
 
-    # 起動時にSlack履歴を登録
     load_slack_history_on_startup()
 
-    # Socket Modeでボットを起動
     handler = SocketModeHandler(app, settings.slack_app_token)
     handler.start()
 
