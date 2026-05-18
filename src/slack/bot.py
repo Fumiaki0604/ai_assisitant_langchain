@@ -17,6 +17,7 @@ from src.slack.image_handler import fetch_images_from_event
 from src.evaluation.evaluator import evaluate_and_log
 import logging
 import re
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -356,7 +357,8 @@ def start_bot():
     logger.info(f"App token: {settings.slack_app_token[:20]}...")
     logger.info(f"Auto-reply channels: {AUTO_REPLY_CHANNELS}")
 
-    load_slack_history_on_startup()
+    # 起動時同期はバックグラウンドで実行（Socket Mode開始をブロックしない）
+    threading.Thread(target=load_slack_history_on_startup, daemon=True).start()
 
     handler = SocketModeHandler(app, settings.slack_app_token)
     handler.start()
