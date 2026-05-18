@@ -32,6 +32,16 @@ feedback_logger = get_feedback_logger()
 AUTO_REPLY_CHANNELS = [ch.strip() for ch in settings.slack_auto_reply_channels.split(',') if ch.strip()]
 NO_WEB_SEARCH_CHANNELS = [ch.strip() for ch in settings.slack_no_web_search_channels.split(',') if ch.strip()]
 
+# ボット自身のユーザーID（起動時に取得してキャッシュ）
+_BOT_USER_ID: str = None
+
+
+def _get_bot_user_id(client) -> str:
+    global _BOT_USER_ID
+    if _BOT_USER_ID is None:
+        _BOT_USER_ID = client.auth_test()["user_id"]
+    return _BOT_USER_ID
+
 URL_PATTERN = re.compile(r'https?://[^\s<>]+')
 
 
@@ -207,7 +217,10 @@ def handle_message_events(event, say, client):
             return
 
         text = event.get("text", "")
-        if re.search(r'<@[A-Z0-9]+>', text):
+        # ボット自身へのメンションのみスキップ（app_mentionで処理）
+        # 他ユーザーへのメンションはスキップしない
+        bot_user_id = _get_bot_user_id(client)
+        if f'<@{bot_user_id}>' in text:
             return
 
         channel = event.get("channel")
