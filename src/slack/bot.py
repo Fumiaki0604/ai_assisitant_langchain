@@ -69,7 +69,8 @@ def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:
     if slack_sources and not is_unable:
         section = f"*②Slackの過去事例*\n{len(slack_sources)}件見つかりました。"
         for src in slack_sources[:3]:
-            section += f"\n• <{src['link']}|{src['title']}>" if src.get('link') else f"\n• {src['title']}"
+            # 生URLを使うことでSlackのスレッドプレビューカード(unfurl)を表示
+            section += f"\n{src['link']}" if src.get('link') else f"\n• {src['title']}"
         sections.append(section)
     else:
         sections.append("*②Slackの過去事例*\n該当なし")
@@ -182,7 +183,8 @@ def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event:
     say(
         text=answer_text,
         blocks=_build_reply_blocks(answer_text, text),
-        thread_ts=thread_ts
+        thread_ts=thread_ts,
+        unfurl_links=True,
     )
     logger.info(f"Response sent to {user}")
 
