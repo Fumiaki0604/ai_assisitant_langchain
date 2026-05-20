@@ -234,10 +234,7 @@ def handle_message_events(event, say, client):
         ts = event.get("ts")
 
         if thread_ts:
-            has_human, has_bot = _get_thread_reply_status(client, channel, thread_ts)
-            if has_human:
-                logger.info(f"Skipping: Human has already replied to thread {thread_ts}")
-                return
+            _, has_bot = _get_thread_reply_status(client, channel, thread_ts)
             if has_bot:
                 logger.info(f"Skipping: Bot has already replied to thread {thread_ts}")
                 return
