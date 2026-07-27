@@ -101,22 +101,6 @@ def format_confidence_indicator(confidence_score: float, grounding_warning: str 
     return text
 
 
-def _get_thread_reply_status(client, channel: str, thread_ts: str) -> tuple:
-    """(has_human_reply, has_bot_reply) を返す"""
-    try:
-        bot_user_id = client.auth_test()["user_id"]
-        result = client.conversations_replies(channel=channel, ts=thread_ts, limit=100)
-        has_human = has_bot = False
-        for msg in result.get("messages", [])[1:]:
-            if msg.get("user") == bot_user_id or msg.get("bot_id"):
-                has_bot = True
-            else:
-                has_human = True
-        return has_human, has_bot
-    except Exception as e:
-        logger.error(f"Error checking thread replies: {e}")
-        return False, False
-
 
 def _build_reply_blocks(answer_text: str, question_text: str) -> list:
     return [
@@ -144,15 +128,16 @@ def _build_reply_blocks(answer_text: str, question_text: str) -> list:
     ]
 
 
-def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event: dict, say):
+def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event: dict, say, classify_intent: bool = True):
     """質問への回答と返信を処理する共通ロジック"""
     images = fetch_images_from_event(event, settings.slack_bot_token)
 
-    intent_result = rag_service.classify_message_intent(text)
-    if intent_result["intent"] == "share":
-        say(text=intent_result["acknowledgment"], thread_ts=thread_ts)
-        logger.info(f"Acknowledgment sent (share message)")
-        return
+    if classify_intent:
+        intent_result = rag_service.classify_message_intent(text)
+        if intent_result["intent"] == "share":
+            say(text=intent_result["acknowledgment"], thread_ts=thread_ts)
+            logger.info(f"Acknowledgment sent (share message)")
+            return
 
     url_content = ""
     urls = extract_urls(text)
@@ -234,13 +219,46 @@ def handle_message_events(event, say, client):
         ts = event.get("ts")
 
         if thread_ts:
-            _, has_bot = _get_thread_reply_status(client, channel, thread_ts)
-            if has_bot:
-                logger.info(f"Skipping: Bot has already replied to thread {thread_ts}")
+            # スレッド返信の場合: スレッドのコンテキストを取得
+            try:
+                result = client.conversations_replies(channel=channel, ts=thread_ts, limit=100)
+                messages = result.get("messages", [])
+                if not messages:
+                    return
+
+                bot_user_id = _get_bot_user_id(client)
+                original_poster = messages[0].get("user")
+                current_user = event.get("user")
+
+                # 元の質問者以外の返信（専門家回答など）はスキップ
+                if current_user != original_poster:
+                    logger.info(f"Skipping: reply from {current_user} (not original poster {original_poster})")
+                    return
+
+                replies = messages[1:]
+                # ボットが既に返信済みの場合はスキップ
+                has_bot = any(m.get("user") == bot_user_id or m.get("bot_id") for m in replies)
+                if has_bot:
+                    logger.info(f"Skipping: Bot already replied to thread {thread_ts}")
+                    return
+
+                # 専門家（元の質問者以外の人間）が既に関与している場合はスキップ
+                has_human_expert = any(
+                    m.get("user") and m.get("user") != bot_user_id and not m.get("bot_id") and m.get("user") != original_poster
+                    for m in replies
+                )
+                if has_human_expert:
+                    logger.info(f"Skipping: Human expert already engaged in thread {thread_ts}")
+                    return
+            except Exception as e:
+                logger.error(f"Error checking thread context: {e}")
                 return
 
         logger.info(f"Auto-replying to message from {event.get('user')} in channel {channel}: {text}")
-        _answer_and_reply(text, channel, thread_ts or ts, event.get("user"), event, say)
+        # ルートメッセージはintent分類をスキップ（常に質問として処理）
+        # スレッド返信のみ分類（「ありがとうございます」等を除外するため）
+        is_root_message = thread_ts is None
+        _answer_and_reply(text, channel, thread_ts or ts, event.get("user"), event, say, classify_intent=not is_root_message)
 
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
@@ -333,6 +351,78 @@ def handle_reaction_added(event, client):
         logger.error(f"Error handling reaction: {e}", exc_info=True)
 
 
+def answer_missed_questions(slack_client, lookback_minutes: int = 60):
+    """起動時に未回答の質問に遡って回答する"""
+    if not AUTO_REPLY_CHANNELS:
+        return
+
+    import time
+    oldest = str(time.time() - lookback_minutes * 60)
+    bot_user_id = slack_client.auth_test()["user_id"]
+
+    for channel_id in AUTO_REPLY_CHANNELS:
+        try:
+            result = slack_client.conversations_history(channel=channel_id, oldest=oldest, limit=50)
+            messages = result.get("messages", [])
+            # 古い順に処理
+            for msg in reversed(messages):
+                if msg.get("subtype") or msg.get("bot_id"):
+                    continue
+                if f'<@{bot_user_id}>' in msg.get("text", ""):
+                    continue
+
+                ts = msg.get("ts")
+                # スレッドの状態確認
+                thread_result = slack_client.conversations_replies(channel=channel_id, ts=ts, limit=20)
+                thread_msgs = thread_result.get("messages", [])
+
+                has_bot = any(
+                    m.get("user") == bot_user_id or m.get("bot_id")
+                    for m in thread_msgs[1:]
+                )
+                if has_bot:
+                    continue  # 既に回答済み
+
+                logger.info(f"Answering missed question in {channel_id}: {msg.get('text', '')[:80]}")
+                try:
+                    # Slack clientからsayの代わりに直接投稿
+                    text = msg.get("text", "")
+                    images = fetch_images_from_event(msg, settings.slack_bot_token)
+                    intent_result = rag_service.classify_message_intent(text)
+                    if intent_result["intent"] == "share":
+                        continue  # 共有メッセージはスキップ
+
+                    result_qa = rag_service.answer_question(
+                        text, "", images=images,
+                        skip_web_search=(channel_id in NO_WEB_SEARCH_CHANNELS)
+                    )
+                    answer_text = result_qa['answer']
+                    sources_section = format_sources_section(
+                        result_qa.get('sources_by_type', {}),
+                        result_qa.get('is_unable_to_answer', False)
+                    )
+                    if sources_section:
+                        answer_text += "\n\n---\n*参考情報*\n" + sources_section
+                    if not result_qa.get('is_unable_to_answer', False):
+                        answer_text += "\n\n" + format_confidence_indicator(
+                            result_qa.get('confidence_score', 0.0),
+                            result_qa.get('grounding_warning')
+                        )
+
+                    slack_client.chat_postMessage(
+                        channel=channel_id,
+                        thread_ts=ts,
+                        text=answer_text,
+                        blocks=_build_reply_blocks(answer_text, text),
+                        unfurl_links=True,
+                    )
+                    logger.info(f"Answered missed question ts={ts}")
+                except Exception as e:
+                    logger.error(f"Error answering missed question ts={ts}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to check missed questions for channel {channel_id}: {e}")
+
+
 def load_slack_history_on_startup():
     if not AUTO_REPLY_CHANNELS:
         logger.info("No auto-reply channels configured, skipping history load")
@@ -358,6 +448,15 @@ def start_bot():
 
     # 起動時同期はバックグラウンドで実行（Socket Mode開始をブロックしない）
     threading.Thread(target=load_slack_history_on_startup, daemon=True).start()
+
+    # 起動時に未回答の質問に遡って回答（デプロイ中の欠落を補完）
+    slack_client = app.client
+    threading.Thread(
+        target=answer_missed_questions,
+        args=(slack_client,),
+        kwargs={"lookback_minutes": 60},
+        daemon=True
+    ).start()
 
     handler = SocketModeHandler(app, settings.slack_app_token)
     handler.start()

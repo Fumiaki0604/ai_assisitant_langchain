@@ -11,12 +11,12 @@ from langchain_pinecone import PineconeVectorStore
 from langchain_community.document_loaders import (
     PyPDFLoader,
     Docx2txtLoader,
-    UnstructuredMarkdownLoader,
     TextLoader
 )
 from src.rag.embeddings import get_embeddings
 from config.settings import settings
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -56,11 +56,27 @@ class FileDocumentLoader:
         elif ext in ['.docx', '.doc']:
             return Docx2txtLoader(file_path)
         elif ext == '.md':
-            return UnstructuredMarkdownLoader(file_path)
+            return TextLoader(file_path, encoding='utf-8')
         elif ext == '.txt':
             return TextLoader(file_path, encoding='utf-8')
         else:
             return None
+
+    def _extract_frontmatter(self, file_path: str) -> dict:
+        """YAMLフロントマターをメタデータとして抽出"""
+        try:
+            content = Path(file_path).read_text(encoding="utf-8")
+            match = re.match(r'^---\n(.*?)\n---\n', content, re.DOTALL)
+            if not match:
+                return {}
+            metadata = {}
+            for line in match.group(1).splitlines():
+                if ":" in line:
+                    key, _, value = line.partition(":")
+                    metadata[key.strip()] = value.strip()
+            return metadata
+        except Exception:
+            return {}
 
     def load_file(self, file_path: str) -> list:
         """
@@ -74,14 +90,16 @@ class FileDocumentLoader:
 
             documents = loader.load()
             file_name = Path(file_path).name
+            frontmatter = self._extract_frontmatter(file_path)
 
             # メタデータを追加
             for doc in documents:
                 doc.metadata.update({
-                    "source": "file",
+                    "source": frontmatter.get("source", "file"),
                     "file_name": file_name,
                     "file_path": file_path,
-                    "title": file_name
+                    "title": file_name,
+                    **{k: v for k, v in frontmatter.items() if k != "source"}
                 })
 
             logger.info(f"Loaded {len(documents)} pages from {file_name}")
