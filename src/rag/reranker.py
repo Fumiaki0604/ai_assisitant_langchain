@@ -12,14 +12,33 @@ try:
 except ImportError:
     COHERE_AVAILABLE = False
 
+try:
+    from sentence_transformers import CrossEncoder
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+
+HF_RERANKER_MODEL = "hotchpotch/japanese-reranker-xsmall-v2"
+
 
 class Reranker:
     def __init__(self, llm, cohere_api_key: str = None):
         self.llm = llm
         self.cohere_client = None
-        if COHERE_AVAILABLE and cohere_api_key:
+        self.hf_model = None
+
+        # HuggingFace日本語リランカーを優先で使用
+        if HF_AVAILABLE:
+            try:
+                self.hf_model = CrossEncoder(HF_RERANKER_MODEL, max_length=512)
+                logger.info(f"HuggingFace Reranker enabled: {HF_RERANKER_MODEL}")
+            except Exception as e:
+                logger.warning(f"HuggingFace Reranker load failed: {e}")
+
+        # HFが使えない場合はCohereにフォールバック
+        if self.hf_model is None and COHERE_AVAILABLE and cohere_api_key:
             self.cohere_client = cohere.Client(cohere_api_key)
-            logger.info("Cohere Rerank enabled")
+            logger.info("Cohere Rerank enabled (fallback)")
 
     def _keyword_score(self, question: str, doc_content: str) -> float:
         question_words = set(re.findall(r'\w+', question.lower()))
@@ -37,6 +56,22 @@ class Reranker:
         if not docs:
             return [], 0.0
 
+        # HuggingFace日本語リランカー
+        if self.hf_model:
+            try:
+                texts = [doc.page_content for doc in docs]
+                pairs = [(question, t) for t in texts]
+                scores = self.hf_model.predict(pairs).tolist()
+                scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+                top_score = scored[0][0] if scored else 0.0
+                # xsmall-v2のスコアはlogit値（0〜1に正規化不要、相対比較で使う）
+                filtered = [doc for score, doc in scored[:top_n]]
+                logger.info(f"HF reranked {len(docs)} -> {len(filtered)} docs (top_score={top_score:.3f})")
+                return filtered, min(top_score, 1.0)
+            except Exception as e:
+                logger.warning(f"HF rerank failed, using fallback: {e}")
+
+        # CohereフォールバックはHFが使えない場合のみ
         if self.cohere_client:
             try:
                 texts = [doc.page_content for doc in docs]

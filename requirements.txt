@@ -20,6 +20,7 @@ nltk>=3.8.0
 
 # Reranking
 cohere>=5.0.0
+sentence-transformers>=5.6.1
 
 # Document Loaders
 pypdf==5.1.0
