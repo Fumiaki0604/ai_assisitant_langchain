@@ -6,15 +6,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_pinecone import PineconeVectorStore
 from langchain_community.document_loaders import (
     PyPDFLoader,
     Docx2txtLoader,
     TextLoader
 )
-from src.rag.embeddings import get_embeddings
-from config.settings import settings
+from src.loaders.pinecone_storage import save_to_pinecone as _save_to_pinecone
 import logging
 import re
 from pathlib import Path
@@ -39,11 +36,6 @@ class FileDocumentLoader:
         self.documents_dir = documents_dir or os.path.join(
             os.path.dirname(__file__), '../../documents'
         )
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
-        )
-        os.environ["PINECONE_API_KEY"] = settings.pinecone_api_key
 
     def get_loader_for_file(self, file_path: str):
         """
@@ -136,39 +128,7 @@ class FileDocumentLoader:
         """
         ドキュメントをPineconeに保存
         """
-        if not documents:
-            logger.warning("No documents to save")
-            return False
-
-        try:
-            embeddings = get_embeddings()
-
-            all_texts = []
-            all_metadatas = []
-
-            for doc in documents:
-                chunks = self.text_splitter.split_text(doc.page_content)
-                for i, chunk in enumerate(chunks):
-                    all_texts.append(chunk)
-                    metadata = doc.metadata.copy()
-                    metadata["chunk_id"] = i
-                    all_metadatas.append(metadata)
-
-            logger.info(f"Saving {len(all_texts)} chunks to Pinecone...")
-
-            PineconeVectorStore.from_texts(
-                texts=all_texts,
-                embedding=embeddings,
-                metadatas=all_metadatas,
-                index_name=settings.pinecone_index_name
-            )
-
-            logger.info("Documents saved to Pinecone successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to save to Pinecone: {e}", exc_info=True)
-            return False
+        return _save_to_pinecone(documents)
 
 
 def load_documents_from_directory(directory: str = None):

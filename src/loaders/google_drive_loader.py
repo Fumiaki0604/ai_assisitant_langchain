@@ -7,12 +7,10 @@ import io
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_pinecone import PineconeVectorStore
 from langchain_core.documents import Document
 from googleapiclient.http import MediaIoBaseDownload
 from src.auth.google_auth import get_google_drive_service
-from src.rag.embeddings import get_embeddings
+from src.loaders.pinecone_storage import save_to_pinecone as _save_to_pinecone
 from config.settings import settings
 import logging
 
@@ -48,12 +46,6 @@ class GoogleDriveLoader:
 
         # Google Drive APIサービスを初期化
         self.service = get_google_drive_service(self.credentials_path, self.token_path)
-
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
-        )
-        os.environ["PINECONE_API_KEY"] = settings.pinecone_api_key
 
     def list_files_in_folder(self, folder_id: str = None, recursive: bool = True) -> list:
         """
@@ -296,7 +288,7 @@ class GoogleDriveLoader:
 
     def save_to_pinecone(self, documents: list) -> bool:
         """
-        ドキュメントをPineconeに保存
+        ドキュメントをPineconeに保存。文字化けチェック後に共通ストレージへ委譲。
 
         Args:
             documents: Documentオブジェクトのリスト
@@ -304,47 +296,19 @@ class GoogleDriveLoader:
         Returns:
             bool: 成功したかどうか
         """
-        if not documents:
-            logger.warning("No documents to save")
+        cleaned_docs = []
+        for doc in documents:
+            cleaned_content = self._clean_text(doc.page_content)
+            if self._is_garbled(cleaned_content):
+                logger.warning(f"Skipping garbled document: {doc.metadata.get('file_name', 'unknown')}")
+                continue
+            cleaned_docs.append(Document(page_content=cleaned_content, metadata=doc.metadata))
+
+        if not cleaned_docs:
+            logger.warning("No valid documents after garble check")
             return False
 
-        try:
-            embeddings = get_embeddings()
-
-            all_texts = []
-            all_metadatas = []
-
-            for doc in documents:
-                # テキストをクリーンアップ
-                cleaned_content = self._clean_text(doc.page_content)
-                if self._is_garbled(cleaned_content):
-                    logger.warning(f"Skipping garbled document: {doc.metadata.get('file_name', 'unknown')}")
-                    continue
-                chunks = self.text_splitter.split_text(cleaned_content)
-                for i, chunk in enumerate(chunks):
-                    cleaned_chunk = self._clean_text(chunk)
-                    if self._is_garbled(cleaned_chunk):
-                        continue
-                    all_texts.append(cleaned_chunk)
-                    metadata = doc.metadata.copy()
-                    metadata["chunk_id"] = i
-                    all_metadatas.append(metadata)
-
-            logger.info(f"Saving {len(all_texts)} chunks to Pinecone...")
-
-            PineconeVectorStore.from_texts(
-                texts=all_texts,
-                embedding=embeddings,
-                metadatas=all_metadatas,
-                index_name=settings.pinecone_index_name
-            )
-
-            logger.info("Documents saved to Pinecone successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to save to Pinecone: {e}", exc_info=True)
-            return False
+        return _save_to_pinecone(cleaned_docs)
 
 
 def load_documents_from_google_drive(folder_id: str = None):
