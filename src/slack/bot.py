@@ -201,7 +201,8 @@ def handle_mention(event, say, client):
 @app.event("message")
 def handle_message_events(event, say, client):
     try:
-        if event.get("subtype") or event.get("bot_id"):
+        subtype = event.get("subtype")
+        if (subtype and subtype != "file_share") or event.get("bot_id"):
             return
 
         text = event.get("text", "")
