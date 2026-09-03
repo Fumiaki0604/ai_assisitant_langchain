@@ -18,7 +18,7 @@ try:
 except ImportError:
     HF_AVAILABLE = False
 
-HF_RERANKER_MODEL = "hotchpotch/japanese-reranker-xsmall-v2"
+HF_RERANKER_MODEL = "hotchpotch/japanese-reranker-small-v2"
 
 
 class Reranker:
