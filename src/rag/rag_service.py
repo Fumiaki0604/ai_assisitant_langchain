@@ -99,12 +99,35 @@ class RAGService:
 
         return {"slack": slack_sources, "drive": drive_sources, "other": other_sources}
 
+    def _generate_hypothetical_doc(self, question: str) -> str:
+        """HyDE: 質問に対する仮説回答を生成してdense embeddingの精度を向上させる"""
+        prompt = (
+            "あなたは社内AIアシスタントです。以下の質問に対して、社内ドキュメントに書かれていそうな内容を想定して、"
+            "短い回答文（2〜4文）を生成してください。これは検索精度向上のための仮説文であり、実際のユーザーへの返答ではありません。\n\n"
+            f"質問: {question}\n\n仮説回答:"
+        )
+        try:
+            result = self.llm.invoke(prompt)
+            hypo = result.content if hasattr(result, "content") else result
+            logger.info(f"HyDE generated: {str(hypo)[:60]}...")
+            return hypo
+        except Exception as e:
+            logger.warning(f"HyDE generation failed, falling back to original query: {e}")
+            return question
+
     def _hybrid_search(self, question: str, top_k: int = 10) -> List[Document]:
-        """Hybrid Search（dense Titan + sparse BM25）でPineconeを検索"""
+        """Hybrid Search（dense Titan + sparse BM25）でPineconeを検索。
+        HyDE有効時はdense側に仮説回答のembeddingを使用し、sparse側は元クエリのまま維持する。
+        """
         from pinecone import Pinecone
         alpha = settings.pinecone_hybrid_alpha
 
-        dense = self.embeddings.embed_query(question)
+        # HyDE: dense embeddingは仮説回答から生成、BM25は元クエリを維持
+        if settings.hyde_enabled:
+            hyde_doc = self._generate_hypothetical_doc(question)
+            dense = self.embeddings.embed_query(hyde_doc)
+        else:
+            dense = self.embeddings.embed_query(question)
         sparse = self.bm25.encode_queries(question)
 
         scaled_dense = [v * alpha for v in dense]

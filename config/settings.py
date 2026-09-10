@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Pinecone Hybrid Search
     pinecone_hybrid_alpha: float = 0.7  # 0=sparse only, 1=dense only
 
+    # HyDE (Hypothetical Document Embeddings)
+    hyde_enabled: bool = True  # クエリから仮説回答を生成してdense検索精度を向上させる
+
     # Application
     log_level: str = "INFO"
     feedback_log_file: str = "logs/feedback.json"
