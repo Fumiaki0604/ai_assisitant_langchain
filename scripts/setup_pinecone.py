@@ -38,7 +38,7 @@ def setup_pinecone_index():
             # インデックスを作成（Serverless Starter用）
             pc.create_index(
                 name=settings.pinecone_index_name,
-                dimension=1024,  # Bedrock Embeddings (Titan Text Embeddings V2) の次元数
+                dimension=768,  # Ruri v3-310m (cl-nagoya) の次元数
                 metric='dotproduct',  # hybrid search（sparse + dense）対応
                 spec=ServerlessSpec(
                     cloud='aws',
