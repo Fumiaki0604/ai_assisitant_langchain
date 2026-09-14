@@ -1,4 +1,21 @@
 """Slack 返答のフォーマット処理"""
+import re
+
+
+def clean_for_slack(text: str) -> str:
+    """LLM出力のMarkdown記法をSlackで読みやすい形に変換する。
+
+    - **bold** → plain text（可視アスタリスクを除去）
+    - ## 見出し → 見出しのみ（# 記号を除去）
+    - --- 水平線 → 除去
+    """
+    # **text** → text（Markdown二重アスタリスクを除去）
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    # ## Header / ### Header → Header
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # --- 水平線 → 除去（3個以上の-のみの行）
+    text = re.sub(r'^-{3,}\s*$', '', text, flags=re.MULTILINE)
+    return text
 
 
 def format_sources_section(sources_by_type: dict, is_unable: bool) -> str:

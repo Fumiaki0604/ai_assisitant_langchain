@@ -14,7 +14,7 @@ from src.rag.web_searcher import fetch_url_content
 from src.feedback.feedback_logger import get_feedback_logger
 from src.loaders.slack_loader import SlackHistoryLoader
 from src.slack.image_handler import fetch_images_from_event
-from src.slack.response_formatter import format_sources_section, format_confidence_indicator, build_reply_blocks
+from src.slack.response_formatter import format_sources_section, format_confidence_indicator, build_reply_blocks, clean_for_slack
 from src.evaluation.evaluator import evaluate_and_log
 import logging
 import re
@@ -75,7 +75,7 @@ def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event:
         skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS)
     )
 
-    answer_text = result['answer']
+    answer_text = clean_for_slack(result['answer'])
 
     sources_section = format_sources_section(
         result.get('sources_by_type', {}),
