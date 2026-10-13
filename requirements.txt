@@ -44,14 +44,14 @@ google-api-python-client==2.116.0
 Pillow>=10.0.0
 
 # Utilities
-numpy>=2.0.0,<3
 python-dotenv==1.0.1
 pydantic==2.10.5
 pydantic-settings==2.7.1
 
 # RAG Evaluation
 ragas>=0.2.0
-datasets>=2.18.0
+datasets>=2.18.0,<3.0.0
+pyarrow>=14.0.0,<21.0.0
 
 # Development and Testing
 pytest==8.3.4
