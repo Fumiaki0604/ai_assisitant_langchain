@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     aws_region: str = "us-west-2"
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
-    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5"
+    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     # Pinecone
     pinecone_api_key: str
