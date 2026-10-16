@@ -3,7 +3,7 @@ RAG（検索拡張生成）サービス
 """
 import sys
 import os
-from typing import List
+from typing import List, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -46,7 +46,11 @@ class RAGService:
             logger.error(f"BM25Encoder init failed: {e}", exc_info=True)
             raise
 
+        # Pineconeインデックスを起動時にキャッシュ（クエリごとの再接続を防ぐ）
+        from pinecone import Pinecone
         logger.info(f"Connecting to Pinecone index: {settings.pinecone_index_name}")
+        pc = Pinecone(api_key=settings.pinecone_api_key)
+        self.pinecone_index = pc.Index(settings.pinecone_index_name)
 
         self.llm = get_bedrock_llm()
         self.classifier = Classifier(self.llm)
@@ -54,6 +58,10 @@ class RAGService:
 
         self.prompt = PromptTemplate(
             template=RAG_PROMPT_TEMPLATE,
+            input_variables=["context", "question"]
+        )
+        self.internal_search_prompt = PromptTemplate(
+            template=INTERNAL_SEARCH_PROMPT_TEMPLATE,
             input_variables=["context", "question"]
         )
         self.web_fallback_prompt = PromptTemplate(
@@ -116,10 +124,9 @@ class RAGService:
             return question
 
     def _hybrid_search(self, question: str, top_k: int = 10) -> List[Document]:
-        """Hybrid Search（dense Titan + sparse BM25）でPineconeを検索。
+        """Hybrid Search（dense Ruri + sparse BM25）でPineconeを検索。
         HyDE有効時はdense側に仮説回答のembeddingを使用し、sparse側は元クエリのまま維持する。
         """
-        from pinecone import Pinecone
         alpha = settings.pinecone_hybrid_alpha
 
         # HyDE: dense embeddingは仮説回答から生成、BM25は元クエリを維持
@@ -136,9 +143,7 @@ class RAGService:
             "values": [v * (1 - alpha) for v in sparse["values"]],
         }
 
-        pc = Pinecone(api_key=settings.pinecone_api_key)
-        index = pc.Index(settings.pinecone_index_name)
-        results = index.query(
+        results = self.pinecone_index.query(
             vector=scaled_dense,
             sparse_vector=scaled_sparse,
             top_k=top_k,
@@ -172,14 +177,60 @@ class RAGService:
         result = self.llm.invoke([HumanMessage(content=content_blocks)])
         return result.content if hasattr(result, 'content') else result
 
+    def _search_and_rerank(self, question: str) -> Tuple[List[Document], float, dict]:
+        """検索・リランク・ソース分類をまとめて実行"""
+        candidate_docs = self._hybrid_search(question)
+        source_docs, top_score = self.reranker.rerank_documents(question, candidate_docs, top_n=3, min_score=0.5)
+        sources_by_type = self._classify_sources(source_docs)
+        return source_docs, top_score, sources_by_type
+
+    def _build_prompt(
+        self,
+        question: str,
+        source_docs: List[Document],
+        web_results: list,
+        url_content: str,
+        request_type: str,
+    ) -> str:
+        """リクエストタイプとコンテキストに応じてプロンプトを構築"""
+        is_internal_only = request_type in ("experience", "document", "owner")
+
+        if is_internal_only:
+            context = "\n\n".join(doc.page_content for doc in source_docs) or "該当する社内情報なし"
+            return self.internal_search_prompt.format(context=context, question=question)
+
+        if web_results:
+            web_context_parts = []
+            for r in web_results:
+                entry = f"### {r['title']}\nURL: {r['url']}"
+                if r.get('content'):
+                    entry += f"\n{r['content']}"
+                web_context_parts.append(entry)
+            web_context = "\n\n".join(web_context_parts)
+
+            internal_parts = [doc.page_content for doc in source_docs]
+            if url_content:
+                internal_parts.append(f"URLの内容:\n{url_content}")
+            internal_context = "\n\n".join(internal_parts) or "該当する社内情報なし"
+
+            return self.web_fallback_prompt.format(
+                web_context=web_context,
+                internal_context=internal_context,
+                question=question
+            )
+
+        context_parts = [doc.page_content for doc in source_docs]
+        if url_content:
+            context_parts.append(f"URLの内容:\n{url_content}")
+        context = "\n\n".join(context_parts)
+        return self.prompt.format(context=context, question=question)
+
     def answer_question(self, question: str, url_content: str = "", images: list = None, skip_web_search: bool = False) -> dict:
         """質問に対してRAGで回答を生成"""
         try:
             logger.info(f"Processing question: {question[:50]}...")
 
-            candidate_docs = self._hybrid_search(question)
-            source_docs, top_score = self.reranker.rerank_documents(question, candidate_docs, top_n=3, min_score=0.5)
-            sources_by_type = self._classify_sources(source_docs)
+            source_docs, top_score, sources_by_type = self._search_and_rerank(question)
 
             request_type = self.classifier.classify_request_type(question)
             is_internal_only = request_type in ("experience", "document", "owner")
@@ -202,40 +253,7 @@ class RAGService:
                 web_results = web_search(question)
                 sources_by_type['web'] = web_results
 
-            # プロンプト選択とコンテキスト構築
-            if is_internal_only:
-                context_parts = [doc.page_content for doc in source_docs]
-                context = "\n\n".join(context_parts) if context_parts else "該当する社内情報なし"
-                internal_search_prompt = PromptTemplate(
-                    template=INTERNAL_SEARCH_PROMPT_TEMPLATE,
-                    input_variables=["context", "question"]
-                )
-                formatted_prompt = internal_search_prompt.format(context=context, question=question)
-            elif should_web_search:
-                web_context_parts = []
-                for r in web_results:
-                    entry = f"### {r['title']}\nURL: {r['url']}"
-                    if r.get('content'):
-                        entry += f"\n{r['content']}"
-                    web_context_parts.append(entry)
-                web_context = "\n\n".join(web_context_parts)
-
-                internal_context_parts = [doc.page_content for doc in source_docs]
-                if url_content:
-                    internal_context_parts.append(f"URLの内容:\n{url_content}")
-                internal_context = "\n\n".join(internal_context_parts) if internal_context_parts else "該当する社内情報なし"
-
-                formatted_prompt = self.web_fallback_prompt.format(
-                    web_context=web_context,
-                    internal_context=internal_context,
-                    question=question
-                )
-            else:
-                context_parts = [doc.page_content for doc in source_docs]
-                if url_content:
-                    context_parts.append(f"URLの内容:\n{url_content}")
-                context = "\n\n".join(context_parts)
-                formatted_prompt = self.prompt.format(context=context, question=question)
+            formatted_prompt = self._build_prompt(question, source_docs, web_results, url_content, request_type)
 
             # LLMで回答生成
             if images:
@@ -251,10 +269,7 @@ class RAGService:
             if not should_web_search and not is_unable and source_docs:
                 grounding_result = self.reranker.verify_grounding(answer, source_docs)
 
-            if should_web_search:
-                confidence_score = 0.7
-            else:
-                confidence_score = top_score * grounding_result["grounding_score"]
+            confidence_score = 0.7 if should_web_search else top_score * grounding_result["grounding_score"]
 
             logger.info(
                 f"Answer generated (unable={is_unable}, confidence={confidence_score:.2f}), "

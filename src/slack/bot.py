@@ -53,6 +53,26 @@ def extract_urls(text: str) -> list:
     return list(set(slack_urls + plain_urls))
 
 
+def _build_response_text(result: dict) -> str:
+    """RAG結果から返信テキストを構築（sources・confidence付き）"""
+    answer_text = clean_for_slack(result['answer'])
+
+    sources_section = format_sources_section(
+        result.get('sources_by_type', {}),
+        result.get('is_unable_to_answer', False)
+    )
+    if sources_section:
+        answer_text += "\n\n---\n*参考情報*\n" + sources_section
+
+    if not result.get('is_unable_to_answer', False):
+        answer_text += "\n\n" + format_confidence_indicator(
+            result.get('confidence_score', 0.0),
+            result.get('grounding_warning')
+        )
+
+    return answer_text
+
+
 def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event: dict, say, classify_intent: bool = True):
     """質問への回答と返信を処理する共通ロジック"""
     images = fetch_images_from_event(event, settings.slack_bot_token)
@@ -75,20 +95,7 @@ def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event:
         skip_web_search=(channel in NO_WEB_SEARCH_CHANNELS)
     )
 
-    answer_text = clean_for_slack(result['answer'])
-
-    sources_section = format_sources_section(
-        result.get('sources_by_type', {}),
-        result.get('is_unable_to_answer', False)
-    )
-    if sources_section:
-        answer_text += "\n\n---\n*参考情報*\n" + sources_section
-
-    if not result.get('is_unable_to_answer', False):
-        answer_text += "\n\n" + format_confidence_indicator(
-            result.get('confidence_score', 0.0),
-            result.get('grounding_warning')
-        )
+    answer_text = _build_response_text(result)
 
     say(
         text=answer_text,
@@ -98,14 +105,19 @@ def _answer_and_reply(text: str, channel: str, thread_ts: str, user: str, event:
     )
     logger.info(f"Response sent to {user}")
 
-    evaluate_and_log(
-        question=text,
-        answer=result['answer'],
-        question_type=result.get('question_type', 'knowledge'),
-        channel=channel,
-        user=user,
-        thread_ts=thread_ts,
-    )
+    # 採点はバックグラウンドで実行（次メッセージ処理をブロックしない）
+    threading.Thread(
+        target=evaluate_and_log,
+        kwargs=dict(
+            question=text,
+            answer=result['answer'],
+            question_type=result.get('question_type', 'knowledge'),
+            channel=channel,
+            user=user,
+            thread_ts=thread_ts,
+        ),
+        daemon=True,
+    ).start()
 
 
 @app.event("app_mention")
@@ -244,7 +256,7 @@ def handle_reaction_added(event, client):
         channel = item.get("channel")
         message_ts = item.get("ts")
 
-        bot_user_id = client.auth_test()["user_id"]
+        bot_user_id = _get_bot_user_id(client)
         result = client.conversations_history(channel=channel, latest=message_ts, limit=1, inclusive=True)
         messages = result.get("messages", [])
         if not messages:
@@ -311,7 +323,6 @@ def answer_missed_questions(slack_client, lookback_minutes: int = 60):
 
                 logger.info(f"Answering missed question in {channel_id}: {msg.get('text', '')[:80]}")
                 try:
-                    # Slack clientからsayの代わりに直接投稿
                     text = msg.get("text", "")
                     images = fetch_images_from_event(msg, settings.slack_bot_token)
                     intent_result = rag_service.classify_message_intent(text)
@@ -322,18 +333,7 @@ def answer_missed_questions(slack_client, lookback_minutes: int = 60):
                         text, "", images=images,
                         skip_web_search=(channel_id in NO_WEB_SEARCH_CHANNELS)
                     )
-                    answer_text = result_qa['answer']
-                    sources_section = format_sources_section(
-                        result_qa.get('sources_by_type', {}),
-                        result_qa.get('is_unable_to_answer', False)
-                    )
-                    if sources_section:
-                        answer_text += "\n\n---\n*参考情報*\n" + sources_section
-                    if not result_qa.get('is_unable_to_answer', False):
-                        answer_text += "\n\n" + format_confidence_indicator(
-                            result_qa.get('confidence_score', 0.0),
-                            result_qa.get('grounding_warning')
-                        )
+                    answer_text = _build_response_text(result_qa)
 
                     slack_client.chat_postMessage(
                         channel=channel_id,

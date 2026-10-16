@@ -1,5 +1,5 @@
 """
-AWS Bedrock (Claude 3.5 Sonnet) との連携
+AWS Bedrock (Claude Haiku 4.5) との連携
 """
 import sys
 import os
@@ -13,6 +13,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_bedrock_llm_instance = None
+
 
 def get_bedrock_llm() -> ChatBedrock:
     """
@@ -24,8 +26,12 @@ def get_bedrock_llm() -> ChatBedrock:
     3. IAMロール（EC2/Lambda等で実行時）
 
     Returns:
-        ChatBedrock: LangChainのBedrock LLMインスタンス
+        ChatBedrock: LangChainのBedrock LLMインスタンス（シングルトン）
     """
+    global _bedrock_llm_instance
+    if _bedrock_llm_instance is not None:
+        return _bedrock_llm_instance
+
     logger.info(f"Initializing Bedrock LLM: {settings.bedrock_model_id}")
 
     # AWS認証情報の設定（環境変数で指定されている場合）
@@ -45,10 +51,10 @@ def get_bedrock_llm() -> ChatBedrock:
     else:
         logger.info("Using AWS credentials from AWS CLI configuration")
 
-    llm = ChatBedrock(**kwargs)
+    _bedrock_llm_instance = ChatBedrock(**kwargs)
     logger.info("Bedrock LLM initialized successfully")
 
-    return llm
+    return _bedrock_llm_instance
 
 
 def test_bedrock_connection():

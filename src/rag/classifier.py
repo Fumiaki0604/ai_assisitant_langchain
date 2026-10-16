@@ -90,24 +90,3 @@ class Classifier:
             logger.warning(f"Slack request type classification failed: {e}")
             return "knowledge"
 
-    def classify_question_type(self, question: str) -> str:
-        """質問が内部製品に関するものか外部サービスに関するものかを判定"""
-        try:
-            prompt = """以下の質問が「自社製品(ecbeing/メルカート/visumo等)に関する技術的な質問」か「外部サービス/一般的な技術の質問」かを判定してください。
-
-質問: {question}
-
-判定基準:
-- 自社製品の機能、設定、運用、事例に関する質問 → internal
-- Google、Bing、AWS等の外部サービスに関する質問 → external
-- SEO、インデックス、サーバー等の一般技術で自社製品に限定されない質問 → external
-
-回答は「internal」か「external」の1単語のみ:"""
-
-            result = self._invoke(prompt.format(question=question))
-            classification = "external" if "external" in result.lower() else "internal"
-            logger.info(f"Question classified as: {classification}")
-            return classification
-        except Exception as e:
-            logger.warning(f"Question classification failed: {e}")
-            return "internal"
