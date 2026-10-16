@@ -6,8 +6,8 @@ RAG（検索拡張生成）を使用してSlack内の質問に自動回答する
 ## 技術スタック
 
 - **言語**: Python 3.12
-- **LLM**: AWS Bedrock (`us.anthropic.claude-sonnet-4-6`)
-- **ベクトルDB**: Pinecone (Amazon Titan Embeddings V2, 1024次元) + **Hybrid Search** (dense + BM25 sparse)
+- **LLM**: AWS Bedrock (`us.anthropic.claude-haiku-4-5-20251001-v1:0`)
+- **ベクトルDB**: Pinecone (Ruri v3-310m, 1024次元) + **Hybrid Search** (dense + BM25 sparse)
 - **リランキング**: Cohere Rerank Multilingual v3（オプション）
 - **Slackフレームワーク**: slack-bolt (Socket Mode)
 - **インフラ**: AWS ECS Fargate / ECR / CloudWatch / Secrets Manager
@@ -26,7 +26,7 @@ Slackリクエストタイプ分類（LLM）
   ├─ DOCUMENT   → 社内資料探索（Web検索・説明禁止）
   ├─ OWNER      → 担当者探索（Web検索・説明禁止）
   └─ OPINION    → 通常RAGフロー
-Pinecone Hybrid Search（dense Titan + sparse BM25, alpha=0.7）
+Pinecone Hybrid Search（dense Ruri v3-310m + sparse BM25, alpha=0.7）
   ↓
 Cohere Rerank（min_score=0.5）または フォールバックスコアリング
   ↓
@@ -143,7 +143,7 @@ slack-ai-assistant/
 │   │   ├── reranker.py        # Cohere Rerank + フォールバック / Grounding検証
 │   │   ├── web_searcher.py    # DuckDuckGo検索 / URLコンテンツ取得
 │   │   ├── prompts.py         # プロンプトテンプレート
-│   │   └── embeddings.py      # Amazon Titan Embeddings V2
+│   │   └── embeddings.py      # Ruri v3-310m (cl-nagoya/ruri-v3-310m)
 │   ├── llm/bedrock.py         # Bedrock LLM
 │   ├── loaders/               # データローダー（Slack / ファイル / Notion / Google Drive）
 │   ├── loaders/sync_state.py  # 増分同期の状態管理（S3/ローカル）
