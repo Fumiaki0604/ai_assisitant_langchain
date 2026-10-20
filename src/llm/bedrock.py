@@ -1,5 +1,5 @@
 """
-AWS Bedrock (Claude Haiku 4.5) との連携
+AWS Bedrock LLM との連携
 """
 import sys
 import os

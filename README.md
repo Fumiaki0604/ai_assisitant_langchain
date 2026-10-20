@@ -6,7 +6,7 @@ RAG（検索拡張生成）を使用してSlack内の質問に自動回答する
 ## 技術スタック
 
 - **言語**: Python 3.12
-- **LLM**: AWS Bedrock (`us.anthropic.claude-3-haiku-20240307-v1:0`)
+- **LLM**: AWS Bedrock (`google.gemma-3-12b-it`)
 - **ベクトルDB**: Pinecone (Ruri v3-310m, 1024次元) + **Hybrid Search** (dense + BM25 sparse)
 - **リランキング**: Cohere Rerank Multilingual v3（オプション）
 - **Slackフレームワーク**: slack-bolt (Socket Mode)

@@ -231,6 +231,8 @@ Resources:
               Value: 0AC0oLVMcTPpcUk9PVA
             - Name: S3_STATE_BUCKET
               Value: !Sub ${AppName}-sync-state-${AWS::AccountId}
+            - Name: BEDROCK_MODEL_ID
+              Value: google.gemma-3-12b-it
           Secrets:
             - Name: PINECONE_API_KEY
               ValueFrom: arn:aws:secretsmanager:us-west-2:433864970174:secret:slack-ai-assistant/pinecone-api-key-rW3Hb8
